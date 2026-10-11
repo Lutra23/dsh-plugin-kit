@@ -131,6 +131,34 @@ i18n 死键 `btn.connectLocalCurrent` 与客户端那份 `localTargetName`（复
 
 ## 已完成（落点 + 门槛）
 
+### ✅ 活动条不再假绿：宿主发 `ready`，客户端只认它（D166 / D167，2026-10-11 完成）
+
+**现场甲（D166）**：用户拿着一张面板截图问「重连中的文案不对」——切目标 / 重连期间活动条已经是
+**绿点 +「实时接收中（docker events）」**，而正文还停在「读取中…」。查下去不是文案问题：
+`openSseStream` 先 `writeHead(200) + flushHeaders()`、**再**去起 `docker events`，浏览器收到响应头
+就 `onopen`，而旧客户端在 `onopen` 里直接置 `open`。「连上了」与「在收数据」是两件事。**实测**
+（黑洞地址 `192.0.2.1` + 真 Chrome）：响应头 0.027s、`error` 20.03s、同窗口 `onopen` 41ms 且
+`readyState=1`、一帧数据都没有——旧代码这 20 秒全程绿。改法：`StreamHandlers.onStart`（本机 `spawn` /
+远端 `openChannel`）+ 四条 SSE 路由发一帧 `ready{}`，客户端四条流的「已就绪」只认它（详见
+[DEFECTS.md](./DEFECTS.md) D166）。
+
+**现场乙（D167，本插件自己引入的回归）**：用户接着在 test profile 实测「切换到新的目标并连接后依然
+显示连接中」——卡片已经列出容器，活动条永远在「正在连接事件流…」。线级实测那台宿主：`/config` 里
+**没有 `streamProtocol`**、`events/stream` 8s 内**一帧都没有** ⇒ **宿主进程还是改动前的旧模块，而浏览器
+每次刷新都读到新的 `client.js`**：旧宿主从不发 `ready`，新客户端死等。改法：版本协商
+（`/config.streamProtocol`）+ 每条流一条「真实数据帧」兜底 + config 晚到时只补一次重开。
+
+**门槛（两条一起）**：`test/streams.test.ts` 5 例 + `test/logs-stream.test.ts` 1 例 + `route-smoke` 四条流
+各一条「首帧必须是 `ready`」+ `client-smoke` 两条接线判据（含四个纯函数态与「旧宿主不许卡死」）。
+**判别性已实测**：摘掉任一路由的 `onStart` → 对应用例红；拆掉四条兜底与协议字段 →
+`route-smoke` 71/72、`client-smoke` 92/94。**真机双向复核**（隔离宿主 + 真 Chrome，用户真实配置全程只读）：
+① 仿真旧宿主包（打包产物上去掉 `ready`/`streamProtocol`，客户端保持新版，形状与用户那台一致）+ 可用
+目标 → 立即绿；② 现代宿主 + 黑洞目标 → 黄「正在连接事件流…」(0ms) → 红「事件流已断开」(4.6s)，
+全程无绿。
+
+**给后人的一句**：真机复现这类问题要**同时看两侧版本**——「宿主有没有发这帧」与「浏览器跑的是哪版
+`client.js`」是两件事，只差一侧就会出现本文这种「看着像产品缺陷、其实是开发档错位」的现象。
+
 ### ✅ docker_logs_grep：日志服务端检索 + `--until` 时间窗（2026-10-09 完成）
 
 **现场**：`docker_logs` 是「取尾工具」不是「检索工具」——三个结构性缺口都在代码里：

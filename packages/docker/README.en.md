@@ -10,7 +10,7 @@
 - **An explicit one-click "connect local"**: two **non-permanent** entries — with no targets at all it is the primary button in the "no Docker targets configured yet" empty state, and once you have other targets it is the **last item in the target dropdown**, `+ Connect local` (it is deliberately **not** on the toolbar, where being permanent means occupying space and begging for clicks — pure noise) — one click (or picking that item) adds the machine hosting the plugin as a local target and selects it (an existing local target is reused, never duplicated; SSH and custom targets stay untouched), and the same operation is `docker_connect_local` on the agent side. It does **not** change the meaning of an empty `targets`, never invents an implicit default target, never installs Docker / starts a daemon / switches docker contexts, and needs no capability grant (it only adds one local target pointing at the plugin's own host).
 - **Aggregated fetches across targets**: the Overview page fans out over every `targets[]` entry in parallel, and an unreachable target only spoils its own cell; the agent side exposes the same shape through `docker_ps target:"*"` / `docker_attention target:"*"`, so targets never block one another.
 - **"Needs attention" reads authoritative fields**: unhealthy / repeatedly restarting / OOM-killed / non-zero exit / dead; OOM and the real exit code come from one `docker inspect` — the 137 in a `docker ps` summary cannot separate an OOM kill from a manual kill, so filtering on the summary alone must misreport.
-- **Four long-lived SSE streams on one substrate**: log FOLLOW, `docker stats`, `docker events` and `docker pull` all run through the same `openSseStream` (heartbeat / active-stream registry / teardown on disconnect) and differ only in how they end — logs and pulls finish on their own, stats and events are aborted by the browser. Multi-select merged logs recover true cross-container ordering from the `--timestamps` prefix; "pause" freezes rendering only (the stream keeps receiving and flushes in one batch on resume).
+- **Four long-lived SSE streams on one substrate**: log FOLLOW, `docker stats`, `docker events` and `docker pull` all run through the same `openSseStream` (heartbeat / active-stream registry / teardown on disconnect / a `ready` frame as soon as the pipeline is up) and differ only in how they end — logs and pulls finish on their own, stats and events are aborted by the browser. "Connected" and "receiving data" are two different things: the client only counts `ready`, never the arrival of the response headers (see "SSE event protocol"). Multi-select merged logs recover true cross-container ordering from the `--timestamps` prefix; "pause" freezes rendering only (the stream keeps receiving and flushes in one batch on resume).
 - **Read-only by default, capability switches in three tiers**: start / stop / remove, exec and image mutations are independent switches; while one is off the agent tools are **not registered** and the HTTP routes return 403 (the capability does not exist, rather than failing when called). Container names and IDs pass a whitelist, every command is built as argv with single-quote escaping, and passwords / passphrases are referenced as `env:NAME` (resolved through the official credential layer, falling back to the environment) and never sent back to the browser.
 - **Right-click a log into the agent**: select the failing lines in the log view, then right-click for "send to the current session / fill the input box so I can edit first" — the selection travels with its target, container, time window and 20 lines of context on each side (the menu states plainly that the content enters the model context and may carry credentials). Delivery reports itself twice: a **viewport-level toast** (attached to `body`, above the panel and the terminal modal), and — when the terminal panel is open — an **automatic fold of the terminal** (`minimize()` on the `ttyPanel` v2 contract; sessions keep running and the sidebar "Terminal" entry's badge restores it), so the conversation is simply there. On older tty without that call it degrades to the toast's "the conversation is behind the panel" hint. To edit first, use the draft action — **the session input box is the only editing surface** (multi-line, with the full context in view, and exactly what the agent receives), instead of a second, weaker card editor. Locating the target session is version-tolerant: **≤0.1.5** reads `current` off the `sessions.list` snapshot, while **since 0.1.6** that field moved out of the session domain together with view selection, so it reads `retainedBy.mainView > 0` instead (the same test `dsh-client-ui-session` and this repo's codegraph use) — trusting only the legacy field greys out both menu items as "no session open". The same read drives "carry the containers tab across a session switch".
 - **Data-level reuse of dsh-tty, no code coupling**: no tty code is imported and tty needs no source change, so the two install and upgrade independently; with tty present three optional extension points are consumed — connection-bar actions (`ttyConnbar`), the terminal host (`ttyTerminal`: a new tab under the tab/dock carriers, an in-place drawer under the modal) and the terminal-side dock (`ttyPanel.mountPane`, used only by the fallback path) — and each degrades silently without tty or below the required version.
@@ -211,6 +211,14 @@ Inside the panel:
   (2026-10-08 user feedback: "verbose and stiff"): the state label on the left already says the stream is closed,
   so this only says "will not recover on its own — click Reconnect". The cause, the cap and the `MaxSessions`
   details live in this page, not in the UI.
+  **"Receiving events" is only claimed on the host's `ready` frame** (2026-10-11 user report): SSE's `onopen`
+  only means "the response headers arrived" — the host flushes those headers **before** it starts `docker events`,
+  and connecting can stall for tens of seconds when the target is unreachable or the SSH connection is being
+  re-established (D150's "quota full → rebuild the connection" adds another round). During that window the strip
+  used to be green and say "Receiving live (docker events)" while not a single event had arrived. The green dot now
+  waits for `ready` (= the pipeline really came up); until then the state stays at "Connecting to the event stream…"
+  or "Connection lost, reconnecting…" — both of which are true. The log / stats / pull streams follow the same rule
+  (see "SSE event protocol").
 - **Select for merging (temporary multi-select merged logs)**: the toolbar's `Select for merging` enters selection
   mode — a checkbox appears on the left of every card, clicking a card body becomes **select / deselect** (it no
   longer opens details; the action bar collapses temporarily so that multi-selecting does not mis-click
@@ -676,7 +684,7 @@ returned 403 on Desktop — the symptom was the logs / stats / events / pull str
 
 | Route | Method | Request body | Response |
 | --- | --- | --- | --- |
-| `/config` | GET | — | `{ok:true, config}`: the config snapshot (targets expose only `passwordSet` / `passphraseSet`, plus the read-only `ttyBooks` / `ttyAvailable` / `toolsRegistered`) |
+| `/config` | GET | — | `{ok:true, config}`: the config snapshot (targets expose only `passwordSet` / `passphraseSet`, plus the read-only `ttyBooks` / `ttyAvailable` / `toolsRegistered` / `streamProtocol` — the last one is the SSE frame protocol version the client uses to decide what counts as "ready"; see "SSE event protocol") |
 | `/config` | POST | any subset of the config keys above | `{ok:true, config}`; an unknown key is 400 and invalid JSON is 400 |
 | `/targets` | GET / POST | — | `{ok:true, targets:[{name, kind, label?\|error?}]}` |
 | `/connect-local` | POST | `{}` (the body is ignored) | **Connect local**: reuses or creates a `kind=local` target and returns `{ok:true, result:{name, kind, created, saved, reachable, serverVersion?, message}, config}`; 503 when the host has no settings service and 500 when the save fails (both carry a reason and change no in-memory config). Requires the same-origin proof (it is a write path) but **not** `allowMutations` / `allowExec` |
@@ -713,14 +721,16 @@ returns 500 or 400 plus an `{error}` text.
 
 The four long streams share one piece of infrastructure (`openSseStream`): uniform header writing +
 `flushHeaders()`, a 15s `: ping` heartbeat frame, active-stream registration (a uniform `end` + abort when the plugin
-is disabled / the config is hot-updated / it is uninstalled), and a silent abort when the client disconnects. They
-differ only in the executor and the end reason:
+is disabled / the config is hot-updated / it is uninstalled), a silent abort when the client disconnects, and a
+**`ready` frame sent as soon as the pipeline is actually up** (see the table below and
+`StreamHandlers.onStart`). They differ only in the executor and the end reason:
 
 Each frame is one `event:` line + one JSON `data:` line (single-line JSON encapsulation: newlines / quotes are
 escaped and multi-byte characters are never split by an SSE line boundary), followed by an empty line:
 
 | Event | data | Description |
 | --- | --- | --- |
+| `ready` | `{}` | sent once **the executor is really running** (local child `spawn` / remote channel opened = `StreamHandlers.onStart`): only then does the client consider the stream "receiving data". **Arrival of the response headers (`onopen`) does not count** — those are written by `flushHeaders()` immediately, while connecting (SSH `acquire` / opening the remote channel) can take tens of seconds, and an unreachable target produces nothing but an `error`. If it never starts there is **no** `ready` at all |
 | `line` | `{"d":"..."}` / `{"e":"..."}` | stdout / stderr chunks (not guaranteed to split on line boundaries, so the client reassembles lines). Used by the log stream and the pull stream |
 | `stats` | `ContainerStats` | stats stream only: one frame per container per second, with fields exactly matching the `/stats` snapshot. The server extracts **flat `{...}` objects** (`docker stats` goes through the TTY renderer even when stdout is a pipe, so frames are mixed with `ESC[H/ESC[K/ESC[J`, and parsing by line would drop whole lines) and collapses repeated renders of the same sample, so the client no longer has to parse docker's PascalCase strings |
 | `event` | `{action, name, image, composeProject?, time?, exitCode?}` | event stream only: one container event per frame (event lines outside the allowlist are dropped server-side; fields whose value is null are omitted) |
@@ -759,6 +769,16 @@ The four streams differ only in "executor + end reason":
   own initiative (abort + `end`).
 - A long SSH stream occupies a connection in the pool (a busy count) and idle reclamation (120s) does not kill it by
   mistake; reclamation resumes once the stream ends.
+- **What counts as "ready" (client side)**: the green dot / "following live" only trusts the host's `ready` frame —
+  arriving response headers do not count. Each stream also has a harder piece of evidence as a fallback (receiving it
+  means the pipeline is producing): the first real event for the events stream, the first line for the log stream,
+  the first sample for the stats stream, the first progress frame for the pull stream.
+  **Development skew** (the host process still runs the old code while the browser reads a new `client.js` from disk)
+  is handled by version negotiation: `streamProtocol < 2` in `/config` (or a host old enough to lack the field)
+  means that host never sends `ready`, so the client falls back to the old criterion (headers arrived = connected)
+  and reopens that stream exactly once so the fallback takes effect — measured on 2026-10-11: an old host plus a new
+  client used to be pinned on "Connecting to the event stream…" forever (cards could read containers while the strip
+  kept spinning).
 
 ## Security model
 
@@ -1020,6 +1040,7 @@ Host half (src/index.ts)
   ├─ generic SSE long connection openSseStream (src/index.ts, one piece of infrastructure for all four streams)
   │   ├─ loopback fence + assertRef / assertImageRef + tail clamping (same as the snapshot routes)
   │   ├─ header write + flushHeaders / 15s ping heartbeat / active-stream registry / silent abort when the frontend disconnects
+  │   │   once the pipeline is up, a ready{} frame first (StreamHandlers.onStart: the only thing the client counts as "receiving data")
   │   ├─ /logs/stream: docker logs -f → line{"d"|"e"} + end{container-exit,code}
   │   ├─ /stats/stream (read-only): docker stats normalised line by line → stats{ContainerStats};
   │   │   it does not end naturally, so a frontend disconnect aborts it and docker stats exiting on its own sends end{stats-exit}
@@ -1087,7 +1108,8 @@ Verification that needs a real daemon follows the manual checklist below.
 (newlines / multi-byte), the local stream lifecycle (fake spawn: multi-byte across chunks, the SIGTERM→SIGKILL
 ladder, close resolve, spawn error) plus the SSH long stream's busy-count pairing / sweeper skip, and the route
 layer's event sequence / heartbeat / silent abort when the client disconnects / uniform wrap-up when the plugin is
-disabled — plus **the `busy` count must return to zero after a long stream is aborted** (D164: neither a far end that
+disabled — plus **`ready` is sent only after `spawn`** (not a single frame before it even though the headers are
+already flushed, and it precedes the first log line) — plus **the `busy` count must return to zero after a long stream is aborted** (D164: neither a far end that
 never confirms the channel close nor eight such leaks in a row may pin the target, and chunks arriving after teardown
 are not delivered) — plus **chunk coalescing** (D151: ten chunks produce a single `line` frame; when the stream ends before the
 window elapses, `end` still comes after those rows) and **exact skip accounting** (D156: frames dropped while a queued
@@ -1126,11 +1148,13 @@ turns red immediately. It depends on the tty preview fixtures
 (generated by `node packages/tty/scripts/preview.mjs`) and **skips with exit 0** when the fixtures or Chrome are
 missing — it is an npm script, not a required vitest entry.
 
-`test/streams.test.ts` (35 cases) covers the **stats stream / event stream / pull stream / networks and volumes /
+`test/streams.test.ts` (46 cases) covers the **stats stream / event stream / pull stream / networks and volumes /
 generic SSE infrastructure**: `statsStream` without `--no-stream` (the same construction point as the snapshot),
 `pullStream`'s `assertImageRef` allowlist, `/stats/stream` normalising line-by-line JSON (including half lines
 across chunks) into `stats` events with the same shape as the `/stats` snapshot, heartbeats, silent abort when the
-client disconnects, `eventsStream`'s argv (no `--since` / `--until`, carrying the `type=container` filter) and the
+client disconnects, **the `ready` frame only once the pipeline is up** (one case per stats / event / pull route:
+zero frames before `spawn` even though the headers are already flushed; two more pin "`ready` precedes the first
+data frame" and "a failed `spawn` sends no `ready`"), `eventsStream`'s argv (no `--since` / `--until`, carrying the `type=container` filter) and the
 `events()` snapshot's `--since` + `--until` (without until it would never exit),
 `parseContainerEvent`'s allowlist / bad-line dropping / health_status suffix / field extraction / compatibility with
 the old `status` field, `/events/stream`'s event sequence and half lines across chunks,
@@ -1256,6 +1280,15 @@ lines), and the gating of the eight `/networks` and `/volumes` endpoints (403 fo
     server-side allowlist);
     after the network drops / `dsh web` restarts, recovery briefly shows a yellow status dot and automatically does
     one full list refresh.
+    **No false green** (2026-10-11 report): point a target's SSH address at a blackhole address (or open the panel
+    while the target is unreachable) → the status dot must be **yellow** with "Connecting to the event stream…", and
+    only turns green once the host confirms `docker events` came up (the `ready` frame); if it cannot connect it
+    finally settles on the red "Event stream closed" + the **Reconnect** button. The log / stats / pull streams
+    follow the same rule (while connecting they each stay on their own "connecting…" copy instead of claiming
+    "following live / receiving live / pulling").
+    One more requirement — **never get stuck**: when the host half is old code (e.g. the host process has not been
+    restarted, so `/config` has no `streamProtocol`) while the browser already loaded the new `client.js`, the strip
+    must fall back to the old criterion and light up — it must not sit on "Connecting to the event stream…" forever.
 18. **Networks / volumes**: the toolbar segments show "Networks" and "Volumes". The network list should contain
     `bridge` / `host` / `none`
     plus project networks created by compose; click one to enter details → the subnet / gateway in the overview match

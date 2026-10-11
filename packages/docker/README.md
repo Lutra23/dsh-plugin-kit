@@ -11,7 +11,7 @@
 - **显式一键连接本机**：两个**非常驻**入口——一个目标都没有时是「还没有配置 Docker 目标」空态里的主按钮，已有别的目标时是**目标下拉的末一项** `＋ 连接本机`（工具条上**不挂**：常驻时它既占位又招人点，纯噪音）——一次点击（或选中该项）就把宿主所在机器加成本机目标并选中（已有本机目标则直接复用，不重复创建；SSH / 自定义目标原样保留），agent 侧同一条操作是 `docker_connect_local`。它**不**改空 `targets` 的语义、**不**凭空造隐式默认目标、**不**自动装 Docker / 起 daemon / 切 docker context，也不需要任何能力授权（只加一条指向插件自身的本机目标）。
 - **多目标聚合取数**：总览页对全部 `targets[]` 并行请求，单个目标不可达只污染自己那一格；agent 侧同一口径由 `docker_ps target:"*"` / `docker_attention target:"*"` 暴露，跨目标不互相阻塞。
 - **「需关注」读权威字段**：不健康 / 反复重启 / OOM 被杀 / 非零退出 / 僵死；OOM 与真实退出码由一次 `docker inspect` 补齐——`docker ps` 摘要里的 137 分不出 OOM 与手动 kill，只按摘要筛必然误报。
-- **四条 SSE 长流共用一套基建**：日志 FOLLOW、`docker stats`、`docker events`、`docker pull` 走同一个 `openSseStream`（心跳 / 活跃流登记 / 断开清理），差异只在收尾语义——日志与拉取自然结束，统计与事件由前端主动断。多选聚合日志按 `--timestamps` 前缀还原跨容器真实时序，「暂停」只冻结渲染（流继续接收，恢复时一次性补齐）。
+- **四条 SSE 长流共用一套基建**：日志 FOLLOW、`docker stats`、`docker events`、`docker pull` 走同一个 `openSseStream`（心跳 / 活跃流登记 / 断开清理 / 管道起来后先发一帧 `ready`），差异只在收尾语义——日志与拉取自然结束，统计与事件由前端主动断。「连上了」与「在收数据」是两件事：客户端只认 `ready`，响应头到达不算（见「SSE 事件协议」）。多选聚合日志按 `--timestamps` 前缀还原跨容器真实时序，「暂停」只冻结渲染（流继续接收，恢复时一次性补齐）。
 - **默认只读，能力开关分三级**：启停删 / exec / 镜像变更各自独立开关，未开启时 agent 工具**不注册**、HTTP 路由 403（能力不存在，而非调用后报错）；开关的**提权走两条带外通道**（启动环境变量 / 卡片里就地确认，见下条）；容器名与 ID 过白名单，命令一律 argv 构造 + 单引号转义，密码 / 口令以 `env:NAME` **凭据引用**（官方凭据层解析，缺失时退回环境变量）且永不回传浏览器。
 - **与 dsh-tty 数据级复用、代码级不耦合**：不 import 任何 tty 代码，tty 也无需改一行源码，两者可各自安装与升级；装了 tty 则消费三个可选扩展点——连接栏动作（`ttyConnbar`）、终端承载（`ttyTerminal`：标签 / dock 承载下经 `open` 新开标签，模态下经 `mount` 就地嵌入抽屉）、以及只在兜底路径用到的终端右侧 dock（`ttyPanel.mountPane`）；未装或版本不足逐项静默降级。
 
@@ -188,6 +188,12 @@ add。装完重启 `dsh web`，侧边栏出现「容器」入口；设置 → �
   断开时右侧那句提示是**折叠头里的单行小字**，所以刻意写短（2026-10-08 用户反馈
   「啰嗦又生硬」）：状态行左边已经在说「事件流已断开」，这句只说「不会自动恢复，点
   「重连」」——成因、上限与 `MaxSessions` 那一串写在本页，不塞进界面。
+  **「在收事件」只认宿主那帧 `ready`**（2026-10-11 用户现场）：SSE 的 `onopen` 只等于
+  「响应头到了」——宿主是先把响应头 flush 出去、**再去起** `docker events`，而目标不可达 /
+  SSH 正在重连时建连可以卡十几秒（D150 的「槽位满 → 重建连接」还会再来一轮）。那段时间
+  活动条原本已经亮成绿色的「实时接收中（docker events）」，一个事件都还没收到。现在绿点
+  只认 `ready`（= 管道真的起来了）；此前停在「正在连接事件流…」/「连接中断，正在自动
+  重连…」——两种都是实话。日志 / 统计 / 拉取三条流同一口径（见「SSE 事件协议」）。
 - **聚合选择（临时多选聚合日志）**：工具条的 `聚合选择` 进入选择态——每张卡片
   左侧出现勾选框，点卡片本体变成**勾选 / 取消**（不再进详情；动作条暂时收起，
   免得一边多选一边误点启停删），工具条与列表之间出现操作条：「已选 N 个容器」+
@@ -639,7 +645,7 @@ challenge 的 TTL 与探测周期各自独立，所以文案只说「执行后�
 
 | 路由 | 方法 | 请求体 | 返回 |
 | --- | --- | --- | --- |
-| `/config` | GET | — | `{ok:true, config}`：配置快照（targets 只给 `passwordSet` / `passphraseSet`，另附只读的 `ttyBooks` / `ttyAvailable` / `toolsRegistered`） |
+| `/config` | GET | — | `{ok:true, config}`：配置快照（targets 只给 `passwordSet` / `passphraseSet`，另附只读的 `ttyBooks` / `ttyAvailable` / `toolsRegistered` / `streamProtocol`——最后这个是 SSE 帧协议版本，客户端据此决定「怎样才算已就绪」，见「SSE 事件协议」） |
 | `/config` | POST | 上表配置键的任意子集 | `{ok:true, config}`；未知键 400，非法 JSON 400 |
 | `/targets` | GET / POST | — | `{ok:true, targets:[{name, kind, label?\|error?}]}` |
 | `/connect-local` | POST | `{}`（请求体被忽略） | **一键连接本机**：复用或新建 `kind=local` 目标并返回 `{ok:true, result:{name, kind, created, saved, reachable, serverVersion?, message}, config}`；宿主没有 settings 服务时 503，保存失败时 500（都带原因且不改内存配置）。要求同源证明（它是写路径），但**不需要** `allowMutations` / `allowExec` |
@@ -676,13 +682,15 @@ challenge 的 TTL 与探测周期各自独立，所以文案只说「执行后�
 
 四条长流共用同一份基建（`openSseStream`）：统一写头 + `flushHeaders()`、15s
 一帧 `: ping` 心跳、活跃流登记（插件禁用 / 配置热更新 / 卸载时统一 `end` +
-abort）、客户端断开静默中止。各自只差执行器与结束原因：
+abort）、客户端断开静默中止，以及**管道起来后先发一帧 `ready`**（下表 + 客户端的
+「绿点只认 ready」口径）。各自只差执行器与结束原因：
 
 每帧一行 `event:` + 一行 JSON `data:`（JSON 单行封装：换行 / 引号被转义，
 多字节字符不会被 SSE 行边界截断），随后空行：
 
 | 事件 | data | 说明 |
 | --- | --- | --- |
+| `ready` | `{}` | **执行器真的起来了**才发一帧（本机子进程 `spawn` / 远端通道已开 = `StreamHandlers.onStart`）：客户端据此才认为「在收数据」。**响应头到达（`onopen`）不算**——响应头由 `flushHeaders()` 立刻写出去，而建连（SSH `acquire` / 远端开通道）可能卡十几秒，目标不可达时干脆只有 `error`。起不来就**没有** `ready` |
 | `line` | `{"d":"..."}` / `{"e":"..."}` | stdout / stderr 分片（不保证按行切，客户端自行拼行）。日志流与拉取流用 |
 | `stats` | `ContainerStats` | 统计流专用：每秒每个容器一帧，字段与 `/stats` 快照完全一致。服务端按**扁平 `{...}` 抽取**（`docker stats` 即便 stdout 是管道也走 TTY 渲染器，帧里混着 `ESC[H/ESC[K/ESC[J`，按行解析会整行丢掉）并折叠同一采样的重复渲染，客户端不必再解析 docker 的 PascalCase 字符串 |
 | `event` | `{action, name, image, composeProject?, time?, exitCode?}` | 事件流专用：一帧一个容器事件（白名单外的事件行在服务端就丢了；值为 null 的字段省略） |
@@ -717,6 +725,13 @@ abort）、客户端断开静默中止。各自只差执行器与结束原因：
   热更新 / 卸载 → 服务端主动收尾（abort + `end`）。
 - SSH 的长流会占用连接池里的连接（busy 计数），空闲回收（120s）不会误杀；
   流结束后恢复回收。
+- **「已就绪」的判据（客户端侧）**：绿点 /「实时跟随中」只认宿主那帧 `ready`——响应头到了
+  不算。此外每条流还有一条「更硬的证据」兜底（收到它就等于管道在产数据）：事件流的第一条
+  真实事件、日志流的第一行、统计流的第一个采样、拉取流的第一帧进度。
+  **开发档错位**（宿主进程还跑着旧代码、浏览器却从磁盘读到新的 `client.js`）另有版本协商：
+  `/config` 的 `streamProtocol < 2`（或老到没有这个字段）说明该宿主从不发 `ready`，客户端
+  退回旧判据（响应头到了就算连上），并只重开一次那条流让回退判据生效——2026-10-11 实测：
+  旧宿主 + 新客户端原本会被钉死在「正在连接事件流…」（卡片能读到容器，活动条却在转）。
 
 ## 安全模型
 
@@ -968,6 +983,7 @@ abort）、客户端断开静默中止。各自只差执行器与结束原因：
   ├─ 通用 SSE 长连接 openSseStream（src/index.ts，四条流共用一份基建）
   │   ├─ loopback 围栏 + assertRef / assertImageRef + tail 夹紧（与快照路由一致）
   │   ├─ 写头 + flushHeaders / 15s ping 心跳 / 活跃流登记 / 前端断开静默 abort
+  │   │   管道起来后先发 ready{}（StreamHandlers.onStart：客户端只认它当「在收数据」）
   │   ├─ /logs/stream：docker logs -f → line{"d"|"e"} + end{container-exit,code}
   │   ├─ /stats/stream（只读）：docker stats 逐行归一 → stats{ContainerStats}；
   │   │   不会自然结束，前端断连即 abort，docker stats 自退则 end{stats-exit}
@@ -1038,14 +1054,17 @@ loopback 403（含三条流路由）、容器名 / 镜像引用注入尝试被�
 多字节）、本地流生命周期（假 spawn：跨 chunk 多字节、SIGTERM→SIGKILL 阶梯、
 close resolve、spawn error）与 SSH 长流的 busy 计数配对 / sweeper 跳过、以及
 路由层的事件序列 / 心跳 / 客户端断开静默中止 / 插件禁用统一收尾，以及
+**`ready` 只在 `spawn` 之后发**（响应头已 flush 也一帧不发，且排在第一条日志行前面）、
 **`tail=0` 只跟随不补历史**（D133）、**背压不重写已写过的帧**与**积压时丢最旧 + `skip` 通知、
 不掐流**（D153）、**skip 账目精确**（D156：skip 排队期间再丢弃，两段缺口都要报——
 46 块逐块对账「每一帧要么送达、要么被 skip 记账」）、
 **中止长流后 `busy` 必须归零**（D164：远端不确认关通道、累积 8 次都不会把目标钉死，
 且收尾后的分片不再投递）、
 以及**分片合帧**（D151：十个分片只出一个 `line` 帧；未到窗口就收尾时 `end` 仍排在
-这些行之后）。合帧器本身的规则（窗口合并 / 攒满即推 / flush 幂等 / dispose 停表）在
-`test/sse-coalesce.test.ts`（6 例）。
+这些行之后）、**`ready` 帧只在管道起来后发**（统计 / 事件 / 拉取三条路由各一例：
+`spawn` 之前一帧都没有——响应头已经 flush 了也不算；另两例钉住「`ready` 排在第一条
+数据帧前面」与「起不来（`spawn` 失败）不发 `ready`」）。合帧器本身的规则（窗口合并 /
+攒满即推 / flush 幂等 / dispose 停表）在 `test/sse-coalesce.test.ts`（6 例）。
 
 `test/log-window.test.ts`（17 例）覆盖**窗口化挂载的纯逻辑**（D152，`client-src/log-window.js`）：
 实测高度进缓存而没量过的行用估算、`layout` 非贴底时的窗口定位与上下垫高自洽、贴底时锚到
@@ -1076,7 +1095,7 @@ close resolve、spawn error）与 SSH 长流的 busy 计数配对 / sweeper 跳�
 （`node packages/tty/scripts/preview.mjs` 生成），夹具或 Chrome 缺失时**跳过并 exit 0**
 —— 它是 npm script，不是 vitest 必跑项。
 
-`test/streams.test.ts`（35 例）覆盖**统计流 / 事件流 / 拉取流 / 网络卷 / 通用 SSE 基建**：
+`test/streams.test.ts`（46 例）覆盖**统计流 / 事件流 / 拉取流 / 网络卷 / 通用 SSE 基建**：
 `statsStream` 不带 `--no-stream`（与快照同一构造点）、`pullStream` 的
 `assertImageRef` 白名单、`/stats/stream` 把逐行 JSON（含跨 chunk 的半行）归一成
 `stats` 事件且形状与 `/stats` 快照一致、心跳、客户端断开静默中止、
@@ -1184,6 +1203,14 @@ network / volume 的 ls·inspect 解析容错（字符串布尔、缺 `Mountpoin
    形式）；点标题可折叠（事件流不中断，展开后仍是累积的最新 8 条）；
    `docker exec` 连续几次**不产生任何事件**（`exec_*` 已被服务端白名单丢掉）；
    断网 / 重启 `dsh web` 后恢复时状态点短暂黄色并自动补一次全量列表刷新。
+   **不得出现假绿**（2026-10-11 现场）：把某个目标的 SSH 地址改成黑洞地址（或在目标
+   不可达时打开面板）→ 状态点必须是**黄色**的「正在连接事件流…」，只有宿主确认
+   `docker events` 起来（`ready` 帧）才转绿；连不上时最终落到红色的「事件流已断开」+
+   「重连」按钮。日志 / 统计 / 拉取三条流同理（建连期间各自停在「正在连接…」，不会
+   先说「实时跟随中 / 实时接收中 / 正在拉取」）。
+   另有一条**不许卡死**：宿主半体仍是旧代码（例如宿主进程还没重启、`/config` 里没有
+   `streamProtocol`）而浏览器已加载新 `client.js` 时，活动条必须退回旧判据并点亮——
+   不能永远停在「正在连接事件流…」。
 18. **网络 / 卷**：工具条分段出现「网络」「卷」。网络列表应含 `bridge` / `host` / `none`
    与 compose 创建的项目网络；点某条进详情 → 概览里子网 / 网关与 `docker network
    inspect` 一致、`internal` 网络带徽标，「接入的容器」页签列出容器名与 IPv4。

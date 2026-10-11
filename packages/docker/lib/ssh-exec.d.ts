@@ -123,6 +123,19 @@ export interface ExecLogger {
 export interface StreamHandlers {
     onStdout(chunk: string): void;
     onStderr(chunk: string): void;
+    /**
+     * 管道**真的起来了**（本机：子进程 spawn 成功；SSH：远端通道已开）时回调一次。
+     *
+     * 为什么需要这个信号：SSE 层「连上了」只等于**HTTP 响应头到了**——`openSseStream`
+     * 是先把 200 + `text/event-stream` flush 出去，再去起 `docker events`。目标连不上 /
+     * SSH 正在重连时，`acquire()` 可能卡上十几秒，浏览器那边却早已触发 `onopen`，界面
+     * 据此报「实时接收中」就是把「响应头」当成了「在收事件」（2026-10-11 用户现场）。
+     * 路由把它变成一帧 `ready`，客户端的绿点因此只在管道起来后才亮。
+     *
+     * **不保证一定回调**：`spawn` 失败（ENOENT）或 SSH 建连/开门失败都直接抛错，
+     * 调用方拿到的是 `error` 帧——那种情况本来就不该说「已就绪」。
+     */
+    onStart?(): void;
 }
 /** 长流结束结果：自然退出给退出码，被中止（signal）时为 null。 */
 export interface StreamResult {

@@ -906,10 +906,74 @@ describe('GET /events/stream（SSE 路由）', () => {
   })
 })
 
-
 /* ------------------------------------------------------------------ *
- * probe()：CLI 版本探测的四条出口（D159）
+ * ready 帧：管道真的起来了才发（2026-10-11 用户现场）
+ *
+ * 现场症状：目标连不上 / SSH 正在重连时，活动条已经亮成绿色的「实时接收中
+ * （docker events）」，而那条流一个字都没收到。成因是 SSE 的「已连接」只等于
+ * **HTTP 响应头到了**——`openSseStream` 先 `flushHeaders()` 再去起 `docker ...`，
+ * 中间的 `acquire()`（建连 / 等池 / D150 的重建）可以卡十几秒。
+ *
+ * 判据必须能区分「响应头」与「管道」：所以下面先断言 spawn 之前**一帧都不该有**，
+ * 再断言 ready 排在第一条数据帧前面。把某条路由的 `onStart` 摘掉，第一条断言就红。
  * ------------------------------------------------------------------ */
+
+describe('ready 帧：管道起来了才算就绪', () => {
+  const CASES: Array<{ name: string; url: string; options: { allowMutations?: boolean } }> = [
+    { name: '统计流', url: '/api/dsh-docker/stats/stream?target=本机&ids=web', options: { allowMutations: false } },
+    { name: '事件流', url: '/api/dsh-docker/events/stream?target=本机', options: {} },
+    { name: '拉取流', url: '/api/dsh-docker/images/pull/stream?target=本机&ref=nginx:1.27', options: { allowMutations: true } },
+  ]
+
+  for (const one of CASES) {
+    it(`${one.name}：响应头已 flush 但进程没起来 → 不发 ready；spawn 后才发，且排在数据前面`, async () => {
+      const { route } = mountPlugin(one.options)
+      const child = makeChild()
+      spawnMock.mockReturnValue(child)
+      const res = makeRes()
+      const pending = route.handler(makeReq(one.url), res)
+
+      // 这一刻浏览器那边 onopen 已经触发了（界面正准备点亮绿点），但 docker 还没起来
+      expect(res.status).toBe(200)
+      expect(res.flushed).toBe(true)
+      expect(res.frames).toEqual([])
+
+      child.emit('spawn')
+      expect(res.frames).toEqual([sseFrame('ready', {})])
+
+      child.emit('close', 0)
+      await pending
+    })
+  }
+
+  it('事件流：ready 必须排在第一条事件帧之前（客户端按到达序点亮）', async () => {
+    const { route } = mountPlugin()
+    const child = makeChild()
+    spawnMock.mockReturnValue(child)
+    const res = makeRes()
+    const pending = route.handler(makeReq('/api/dsh-docker/events/stream?target=本机'), res)
+    child.emit('spawn')
+    child.stdout.emit('data', Buffer.from(EV_START + '\n'))
+    child.emit('close', 0)
+    await pending
+    expect(res.frames[0]).toBe(sseFrame('ready', {}))
+    expect(res.frames[1]).toMatch(/^event: event\n/)
+  })
+
+  it('进程起不来（spawn 失败）不发 ready：那条路只有 error 帧', async () => {
+    const { route } = mountPlugin()
+    const child = makeChild()
+    spawnMock.mockReturnValue(child)
+    const res = makeRes()
+    const pending = route.handler(makeReq('/api/dsh-docker/events/stream?target=本机'), res)
+    // ENOENT：docker CLI 不在 PATH 里（runLocalStream 的 error 分支）
+    child.emit('error', new Error('spawn docker ENOENT'))
+    await pending
+    expect(res.frames.filter((frame) => frame.startsWith('event: ready'))).toEqual([])
+    expect(res.frames.at(-1)).toMatch(/^event: error\n/)
+  })
+})
+
 
 describe('DockerApi.probe：超时必须是独立一档', () => {
   const makeApi = (result: Record<string, unknown> | Error) => {

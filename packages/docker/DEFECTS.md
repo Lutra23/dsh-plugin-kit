@@ -7,8 +7,8 @@
 > 知道**当年坏了什么**，再查 [§2 编号字典](#2-编号字典这段代码为什么长这样) 知道**所以代码为什么
 > 写成这样**。
 >
-> **编号是硬契约**：`D01–D165` 是 `packages/docker` 内部序列，与 `packages/tty/DEFECTS.md` 的
-> `D01–D99` **不共享**；跨包引用请写「docker D03 / tty D12」。新缺陷接在 `D165` 之后，
+> **编号是硬契约**：`D01–D167` 是 `packages/docker` 内部序列，与 `packages/tty/DEFECTS.md` 的
+> `D01–D99` **不共享**；跨包引用请写「docker D03 / tty D12」。新缺陷接在 `D167` 之后，
 > **不得重号、不得回收空号**——源码里已有注释指向它们。
 
 > **本文不含**：逐条 postmortem（症状 / 现场复现 / 根因 / 修法 / 回归 / 反向验证）。
@@ -36,7 +36,7 @@
 
 ## 现状
 
-**已修 165 / 待修 0**，编号至 `D165`。逐条症状见 §1，设计意图见 §2，**还没做的见
+**已修 167 / 待修 0**，编号至 `D167`。逐条症状见 §1，设计意图见 §2，**还没做的见
 [ROADMAP.md](./ROADMAP.md)**。
 
 > ⚠️ **标注（本次未擅改）——两处口径不一致，原文未改：**
@@ -233,6 +233,10 @@
 
 | D165 | **聚合日志的上限定在了浏览器同源连接悬崖之上**（真机现场 2026-10-08：用户报「docker 重连的时候页面很卡」，实测为「整个 DSH 页面卡住」）。机制：宿主是 **HTTP/1.1**（无 h2 多路复用），浏览器对每个源只放有限几条 TCP，而**每条 `EventSource` 独占一条且永不主动释放**——吃满后同页面**所有**普通请求（列表刷新 / `/api/*` / 会话加载）一起排队。实测（真 Chrome + test profile 宿主，页内连打 10 次普通请求、2s 超时）：常驻流 0 条 → 10/10 成功（中位 27ms）；4 条 → 8/8 成功（25ms）；**5 条 → 0/10 全部超时**，而同一时刻**进程外**请求 41ms 正常 —— **堵在浏览器，不在宿主**。而旧代码把这笔账算在了别处：`PICK_MAX = 8`（本地）/ `PICK_MAX_SSH = 6`（SSH），注释里写的理由是「SSH 一条连接要同时装下聚合流、统计流、事件流与刷新等短命令」——那是**宿主侧 `MaxSessions`** 的账（由 `MAX_STREAMS_PER_TARGET = 8` 管），与浏览器这一层**是两笔独立的账**，写成同一个数字正好把两边都算错（6 与 8 都 > 实测安全值 4）。于是「6 条聚合」这个**仓库自己允许**的操作形状会让面板完全取不到数——不是「慢一点」，是整页请求一起失效。旁证：`PICK_SOFT_MAX` 那几行的注释早就写着「浏览器并发长连接有限制」，说明当初意识到了这一层，只是**上限值仍定在了悬崖之上** | `client-src/index.js`：新增 `SAME_ORIGIN_STREAM_BUDGET = 4`（实测值，不是猜的）与 `RESERVED_STREAMS = 1`（容器页常开的事件流占的那条），`PICK_MAX = BUDGET − RESERVED = 3`，`PICK_MAX_SSH` 直接等于 `PICK_MAX`（两个目标类型共用同一个浏览器预算）；`PICK_SOFT_MAX` 6 → 2（在硬上限前留一档，不再有「可点但已偏多」的大区间）；三条 i18n 文案改成点明后果（「再多会占满浏览器的同源连接，整个页面都会卡」）并新增 `hint.pickBudget`，由 `PickBar` 渲染在选择条上——**上限的来由要写在脸上**，否则 3 看起来只是个随手定的数字；`.dk_pickBudget` 样式与之配套。**刻意不做的**：没有把上限按目标类型分档（真正卡页面的是浏览器，与目标是不是 SSH 无关），也没有改 `MAX_STREAMS_PER_TARGET`（宿主侧那笔账另有依据，且不受浏览器影响）。回归：`scripts/client-smoke.mjs` 的聚合用例改成钉住推导链（`MAX=3`、`SSH_MAX=3`、`BUDGET=4`、`RESERVED=1`，以及 `decide(3)` 仍可点 + 软提示、`decide(4)` 置灰），并加一条源码级接线判据（`budget` 真的传进 `PickBar` 且被渲染）。**判别性已实测**：把 `PICK_MAX` 退回 8 → 三条断言红。真机复核：新上限形状（3 聚合 + 1 事件流 = 4 条）下页内请求 **8/8 成功、中位 26ms**；修复前同一形状是 0/6 全超时。**另记两条实测负结论**（免得后人重做）：① **WebSocket 不占这份预算**（tty 终端那条 WS + 4 条 SSE 共存时页面正常，悬崖仍在第 5 条 SSE）；② 重连**动作**本身不额外恶化（每 700ms 全断全连的风暴下仍 26ms）——卡的是**数量**，用户感觉「重连时卡」是因为那一刻已经开了足够多的流 | client-src/index.js、client-src/docker.css、scripts/client-smoke.mjs |
 
+| D166 | **事件流的「实时接收中」曾经只是「SSE 响应头到了」**（2026-10-11 用户拿着面板截图问「重连中的文案不对」：切换 / 重连期间活动条已经是**绿点 +「实时接收中（docker events）」**，而正文还停在「读取中…」）。成因：`openSseStream` 先 `writeHead(200) + flushHeaders()`、**再**去 `await options.run()` 起执行器，而浏览器 `EventSource` 收到响应头就触发 `onopen`——旧客户端在 `onopen` 里直接置 `open`。目标不可达 / SSH 正在重连时 `acquire()` 可能卡十几秒（D150 的「远端槽位满 → 重建连接」还会再来一轮）。**真机实测**（黑洞地址 `192.0.2.1`，隔离宿主 + 真 Chrome）：响应头 **0.027s** 到、`error` 帧 **20.03s** 才到；同一窗口浏览器侧 `onopen` **41ms** 触发、`readyState=1`、**一帧数据都没有**——旧代码这 20 秒全程绿 | `src/ssh-exec.ts` 的 `StreamHandlers` 新增可选 `onStart?()`：本机在子进程 `spawn` 事件、远端在 `openChannel` 成功（含 D150 的重建那轮）之后各触发一次，`signal` 已中止则不触发。`src/index.ts` 新增 `readyOnStart(sendEvent)`，四条 SSE 路由（logs / stats / events / pull）全部挂上——管道真起来后先发一帧 `ready{}`（帧表见 README）。`client-src/index.js` 与 `client-src/log-stream.js` 把「已就绪」从 `onopen` 挪到 `ready`：事件流收敛到单一出口 `applyEventsReady`（重连补偿、D164 清因一并搬进去），统计 / 拉取另认第一个真实数据帧，日志订阅的 `markOpen()` 认 `ready` 或第一行。回归：`test/streams.test.ts` 5 例（三条路由各一例「`spawn` 之前一帧不发」+ 一例「`ready` 必须排在第一条数据帧前」+ 一例「起不来（`spawn` 失败）不发 `ready`」）、`test/logs-stream.test.ts` 1 例、`scripts/route-smoke.mjs` 四条流各一条「首帧必须是 `ready`」（假 docker CLI 真 spawn 的离线端到端）、`scripts/client-smoke.mjs` 接线判据。**判别性已实测**：摘掉 stats 路由的 `onStart` → vitest 1 红；摘掉 logs 的 → `route-smoke` 71/72 且 vitest 1 红；把客户端退回 `onopen` 置 `open` → `client-smoke` 红 | src/ssh-exec.ts、src/index.ts、client-src/index.js、client-src/log-stream.js、test/streams.test.ts、test/logs-stream.test.ts、scripts/route-smoke.mjs、scripts/client-smoke.mjs、README.md、README.en.md |
+
+| D167 | **旧宿主 + 新客户端会被钉死在「正在连接事件流…」**（本插件自己引入的回归；2026-10-11 用户在 test profile 上实测：切换目标并连上后卡片已经列出容器、活动条却永远在转）。成因：客户端半体与宿主半体同包同版本，但**开发档**会出现宿主进程还跑着改动前的模块（Node 内存里那份旧 `lib/`）、浏览器每次刷新却从磁盘读到新的 `client.js` —— 旧宿主**从不发 `ready`**，新客户端死等一帧永远不来的帧。线级实测（用户那台 test 宿主）：`/config` 里**没有 `streamProtocol` 字段**，`local` 与可用 SSH 目标的 `/events/stream` 在 8s 内**一帧都没有** | 版本协商 + 每条流一条兜底。宿主：`src/index.ts` 的 `/config` 新增只读 `streamProtocol: 2`（≥2 = 会发 `ready`）。客户端：`client-src/index.js` 新增纯函数 `hostSendsReadyFrame(config)`（`≥2` 才发；字段存在但更小 / 整个缺失 → 按旧宿主；`config` 未加载 → 先按新宿主），`hostReadyFrameRef` 闸住事件流 `onopen` 的旧判据回退（响应头到了就算连上），「config 晚于建流」时只补一次重开而不是死等（`eventsLinkedRef` + 自增重连令牌），另认**第一条真实事件**为就绪；日志 / 统计 / 拉取各认**第一个真实数据帧**（`markOpen()` / `setStatsStatus('open')` / `setStatus('open')`）——那些流一定会很快出帧。回归：`scripts/client-smoke.mjs` 新增一条（纯函数四态 + 四条接线判据 + 晚到重开），`scripts/route-smoke.mjs` 的 `/config` 断言 `streamProtocol === 2`。**判别性已实测**：拆掉这四条判据与协议字段 → `client-smoke` 92/94、`route-smoke` 71/72。**真机双向复核**（隔离宿主 + 真 Chrome，用户真实配置全程未动）：① 仿真旧宿主包（在打包产物上去掉 `ready` 与 `streamProtocol`，客户端保持新版，形状与用户那台一致）+ 可用目标 → **立即绿**「实时接收中（docker events）」；② 现代宿主 + 黑洞目标（连接卡住）→ **黄「正在连接事件流…」(0ms) → 红「事件流已断开」(4.6s)，全程没有绿**（假绿没回来） | src/index.ts、client-src/index.js、client-src/log-stream.js、scripts/client-smoke.mjs、scripts/route-smoke.mjs、README.md、README.en.md |
+
 ## 2. 编号字典：这段代码为什么长这样
 
 > 本节由原「修复记录摘要（第一轮 D01–D79 / 第二轮 D80–D125）」**重排**而来，「决策 / 机制」
@@ -245,6 +249,8 @@
 | | **中止长流同样要自己 settle**：`stream()` 的 `onAbort` 除了向远端 `KILL` + 关通道，还要**当场 `finish(null)`**——只等远端回话时，远端不确认（KILL 被拒 / 通道静默）就等于 `busy` 永远不平、整台目标的长流被自己的配额钉死。收尾之后到达的分片一律不再投递 | D112、D161、D164 |
 | | 结构化流的 `error` 帧**带着原因**时，客户端必须把它显示出来——丢掉它，「被拒」与「点了没反应」在界面上不可区分 | D164 |
 | | 常驻长流的条数受**浏览器同源连接预算**约束（HTTP/1.1 无多路复用 + `EventSource` 独占连接且不释放）：超了不是「慢一点」，是**同页面所有请求一起失效**。宿主侧 `MaxSessions` 与它是**两笔独立的账**，上限值必须按实测的浏览器预算定，并把来由写在界面上 | D165 |
+| | SSE 的「已连接」**只等于响应头到了**：执行管道起来之前不许报「实时接收中 / 在跟随」——正向信号只认宿主那帧 `ready`（`StreamHandlers.onStart`），响应头不算 | D166 |
+| | 客户端与宿主半体可能**版本错位**（开发档：宿主旧模块 + 浏览器新 `client.js`）：新客户端不许死等旧宿主永远不会发的帧——`/config` 的 `streamProtocol` 协商，外加每条流一条「真实数据帧」兜底 | D167 |
 | | **外部取消（`AbortSignal`）并入已有的收尾路径**：超时与 abort 走同一段 `signal('KILL') + close()` / `SIGKILL` + 收敛期，靠同一个 `settled` 幂等守卫收尾。**超时不能只 `race` 不取消**——外层拿到 `ok:false` 时底层还在跑，占的资源（SSH 会话槽）要等它自然结束才还 | D112、D159、D161 |
 | | 并发首连**先占坑再 `await`** 建连配置，避免同目标并存两条连接、先建的那条脱管 | D02、D94 |
 | | `dropConn(key, client)` 带**身份校验**：陈旧 close/error 不得摘掉同键上的新连接 | D06 |
@@ -313,6 +319,8 @@
 | D138 | `guardTargetFailures` **只标「从 `api.*` 抛出的错误」**。刻意**不是**「把外层 catch 全改成 200」——那会让我们自己的 bug（如解析写错抛的 TypeError）伪装成「目标不可达」，正是本仓最忌讳的静默错误结果；也**没有**逐个调用点包 try/catch（20 处，必然漏几个——D80–D125 那批 29 条就是这么来的） |
 | D139 | **不撤 D32**，只给它开一条**可验证的**窄路：判定项从「两条证明都缺省」改成「都缺省**且**带宿主 Cookie」。桌面壳这条转发链**必带** Cookie（`authenticateWebHost` 换不来就整体 503），浏览器又伪造不了 Cookie 头、跨站请求必带 `sec-fetch-site: cross-site`——所以放宽的是桌面壳，不是浏览器。**刻意不做的两件事**：① 不改成 `origin === undefined → true`（全仓另外 9 个插件就是这个宽松版，但 docker 路由握的是 docker socket ≈ 宿主 root，D32 的收紧有理由）；② 不把 SSE 改成 `streamBaseUrl` 绝对地址直连宿主——那是**跨源**请求，会同时要求 CORS 头与「接受 `cross-site` 标记」，比带 Cookie 的这条路危险得多 |
 | D140 | 给传输补一个 **`stderrHint()`**（已经攒到的 stderr 摘要，空串表示没收到任何输出），只在**错误路径**被 `proxyFailureSuffix` 兜底使用；`failure()` 的**严格语义不动**（只有子进程真退出 / 传输真关闭才算失败事实）。**刻意不做**：不把 `failure()` 放宽成「有 stderr 就算失败」——那会让「健康的命令写了一句警告」也被记成失败，而这是两个不同的判断（前者是事实，后者是线索）；也**没有**在调用方加 `await` 等那 1~2ms——四个连接点的错误路径都是同步构造文案，为一个时序竞态引入异步等待会把简单的地方变复杂 |
+| D166 | 「已就绪」的**唯一正向信号**是宿主那帧 `ready`，**不按时间猜**：更省事的写法是「`onopen` 后 N 秒没有 `ready` 就当旧宿主」，但那会给出一个**明知可能说谎**的绿点——黑洞目标下 `acquire()` 要卡到 SSH 超时（实测 20s），任何小于它的宽限期都会先绿再红，等于把刚修掉的假绿按时间放回来 |
+| D167 | 旧宿主的兜底**不靠猜、靠证据**：日志 / 统计 / 拉取用「第一个真实数据帧」（那些流一定会很快出帧，收到帧比 `ready` 更硬），事件流用 `/config` 的 `streamProtocol` 协商（它可以长时间没有事件，没有别的可信信号）。**刻意不做**：不把 `streamProtocol` 塞进 SSE 响应头（`EventSource` 读不到响应头），也不把 `config` 加进建流 effect 的依赖（config 对象标识一变就会重连全部流——本仓已有「用 ref 拿最新值、别让 config 一变就重连」的既定做法） |
 
 ## 3. 复核方式（原文标称 0.7.0 基线，见 §现状的标注）
 

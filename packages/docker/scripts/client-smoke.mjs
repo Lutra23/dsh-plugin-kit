@@ -1700,6 +1700,67 @@ await test('D164：被拒原因要接到界面上（接线判据）', () => {
   assert.ok(/setEventsRefused\(''\)/.test(source), '重连成功 / 重新建流时必须清掉上一条原因')
 })
 
+/*
+ * 2026-10-11 用户现场：目标连不上 / SSH 正在重连时，活动条已经亮成绿色的「实时接收中
+ * （docker events）」，而那条流一个字都没收到。成因是「已连接」只等于**响应头到了**——
+ * 宿主先把 200 + text/event-stream flush 出去，再去起 `docker events`（src/index.ts 的
+ * readyOnStart）；`acquire()` 建连 / 等池 / D150 重建可以卡十几秒。
+ *
+ * 修法：宿主在**管道真的起来**时发一帧 `ready`（StreamHandlers.onStart），客户端只认它。
+ * 宿主侧的行为由 vitest 的 ready 用例钉住，这里钉客户端接线。
+ */
+await test('活动条 / 日志 / 统计 / 拉取：绿点只认 ready 帧（响应头不算「在收数据」）', () => {
+  const index = readFileSync(new URL('../client-src/index.js', import.meta.url), 'utf8')
+  const logStream = readFileSync(new URL('../client-src/log-stream.js', import.meta.url), 'utf8')
+  const readyAt = index.indexOf("es.addEventListener('ready'")
+  assert.ok(readyAt !== -1, '事件流必须监听宿主的 ready 帧')
+  const openAt = index.indexOf('const applyEventsReady')
+  assert.ok(openAt !== -1, '缺 applyEventsReady（ready 与各兜底判据共用的那一个出口）')
+  assert.ok(index.indexOf("setEventsStatus('open')") > openAt, "setEventsStatus('open') 必须落在 applyEventsReady 里")
+  const readyCount = (index.match(/addEventListener\('ready'/g) ?? []).length
+  assert.ok(readyCount >= 3, '统计 / 事件 / 拉取三条 SSE 都要监听 ready（实际 ' + String(readyCount) + '）')
+  // 日志订阅同一口径（subscribeLogStream 供单容器与聚合两个视图共用）
+  assert.ok(/addEventListener\('ready'/.test(logStream), '日志订阅也必须监听 ready')
+  /*
+   * 但**不许**把 onopen 无条件下重新当成「已就绪」：事件流那条 onopen 必须挂在
+   * 「宿主是旧的」这个闸后面（否则假绿回归）；日志订阅的 onopen 里不许出现任何 onStatus。
+   */
+  assert.ok(/es\.onopen = \(\) => \{\s*eventsLinkedRef\.current = true\s*if \(!hostReadyFrameRef\.current\) applyEventsReady\(\)/.test(index),
+    '事件流的 onopen 只许在「旧宿主」分支里兜底（hostReadyFrameRef 闸门）')
+  assert.ok(!/onopen\s*=\s*\(\)\s*=>\s*\{[^}]*onStatus/.test(logStream), '日志订阅的 onopen 不许置 open')
+})
+
+/*
+ * 2026-10-11 用户第二条反馈（test profile 实测）：**宿主进程还是旧代码、浏览器却是新
+ * client.js** 这种开发档错位下，新客户端死等一帧永远不来的 `ready`，界面被钉在
+ * 「正在连接事件流…」（卡片能读到容器，活动条却在转）。三类兜底各管一段：
+ *   - 事件流：`/config` 的 `streamProtocol` 协商 + 第一个真实事件帧；
+ *   - 日志 / 统计 / 拉取：第一个真实数据帧（那些流一定会很快出帧）。
+ */
+await test('旧宿主（无 ready 帧）不许把界面钉在「连接中」：版本协商 + 数据帧兜底', () => {
+  const api = eventsApi()
+  assert.ok(api.hostSendsReadyFrame !== undefined, '缺少 __events.hostSendsReadyFrame 测试缝')
+  assert.equal(api.hostSendsReadyFrame({ streamProtocol: 2 }), true, 'streamProtocol=2 才是发 ready 的宿主')
+  assert.equal(api.hostSendsReadyFrame({ streamProtocol: 3 }), true, '更高的协议版本同样发 ready')
+  assert.equal(api.hostSendsReadyFrame({ streamProtocol: 1 }), false, 'streamProtocol=1 → 老宿主，退回响应头判据')
+  assert.equal(api.hostSendsReadyFrame({}), false, '比本包更老的宿主根本没有这个字段 → 不发 ready')
+  assert.equal(api.hostSendsReadyFrame(null), true, 'config 还没加载：先按发 ready 处理，到达后由 effect 纠正')
+  const index = readFileSync(new URL('../client-src/index.js', import.meta.url), 'utf8')
+  // config 晚到的一拍：已经拿到响应头但还没就绪 → 重开一次让 onopen 的回退判据生效
+  assert.ok(/if \(!next && eventsLinkedRef\.current\) setEventsReconnect/.test(index),
+    'config 晚到时必须补一次重开（否则停在「正在连接事件流…」）')
+  assert.ok(/if \(eventsLinkedRef\.current\) applyEventsReady\(\)/.test(index),
+    '第一个真实事件帧也算就绪（旧宿主 / 仿真宿主没有 ready 时靠它点亮）')
+  assert.ok(/setStatsStatus\('open'\)/.test(index.slice(index.indexOf('const onStats'))),
+    '统计流：第一个采样就是「已就绪」的证据')
+  assert.ok(/setStatus\('open'\)/.test(index.slice(index.indexOf('const onLine = '), index.indexOf('const onEnd', index.indexOf('const onLine = ')))),
+    '拉取流：第一个进度帧就是「已就绪」的证据')
+  const logStream = readFileSync(new URL('../client-src/log-stream.js', import.meta.url), 'utf8')
+  assert.ok(/markOpen\(\)/.test(logStream), '日志订阅缺少 markOpen')
+  const lineBlock = logStream.slice(logStream.indexOf("addEventListener('line'"), logStream.indexOf("addEventListener('skip'"))
+  assert.ok(lineBlock.includes('markOpen()'), '日志订阅：第一行真实日志必须点亮「已就绪」（旧宿主唯一证据）')
+})
+
 await test('变更操作执行中态：按钮转圈 + 卡片锁组 + 确认框不关', () => {
   // 三处过渡态钩子：按钮 data-busy（图标换转圈）、卡片 data-pending（整组变更按钮压暗锁住）、
   // 确认框 k_confirmBusy（保持打开 + 「执行中…」）。真实点击路径需要浏览器，这里锁契约。

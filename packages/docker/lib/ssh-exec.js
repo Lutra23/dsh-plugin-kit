@@ -1044,6 +1044,17 @@ export class RemoteExec {
             const channel = await this.openChannel(spec, command, DEFAULT_TIMEOUT_MS, 0);
             // 开门成功才可能发生「重连换条目」；开门抛错时条目仍是我占的那条，无需搬
             moveBusyToLive();
+            /*
+             * 管道就绪信号（见 StreamHandlers.onStart）：通道开出来了 = 远端真的开始跑这条
+             * 命令了。上面那两步可能很慢（`acquire()` 要建连 / 等池里那条；D150 的「远端
+             * 槽位满 → 重建连接」还会再来一轮），这段时间里宿主早已 flush 了 SSE 响应头。
+             *
+             * 建连**期间**也可能被中止（上面那次判定只覆盖 await 之前），所以这里要重判一次；
+             * 用一个函数读一次 `signal.aborted`，否则 TS 会拿上面那次的窄化结果报 TS2367。
+             */
+            const abortedWhileConnecting = () => signal?.aborted === true;
+            if (!abortedWhileConnecting())
+                handlers.onStart?.();
             return await new Promise((resolve, reject) => {
                 const stdoutDecoder = new StringDecoder('utf8');
                 const stderrDecoder = new StringDecoder('utf8');
@@ -1717,6 +1728,16 @@ export function runLocalStream(argv, handlers, signal) {
             const text = stderrDecoder.write(chunk);
             if (text !== '')
                 handlers.onStderr(text);
+        });
+        /*
+         * 管道就绪信号（见 StreamHandlers.onStart）：`spawn` 是「进程真的起来了」的唯一
+         * 可信时点——它一定早于任何 stdout 分片，而 `spawn` 之前的等待（PATH 查找 /
+         * 系统调用）正是宿主 flush 了 SSE 响应头、浏览器却什么都还没拿到的那段时间。
+         */
+        child.once('spawn', () => {
+            if (settled)
+                return;
+            handlers.onStart?.();
         });
         child.once('error', (error) => {
             if (settled)

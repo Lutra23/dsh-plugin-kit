@@ -196,6 +196,19 @@ export interface ExecLogger {
 export interface StreamHandlers {
   onStdout(chunk: string): void
   onStderr(chunk: string): void
+  /**
+   * 管道**真的起来了**（本机：子进程 spawn 成功；SSH：远端通道已开）时回调一次。
+   *
+   * 为什么需要这个信号：SSE 层「连上了」只等于**HTTP 响应头到了**——`openSseStream`
+   * 是先把 200 + `text/event-stream` flush 出去，再去起 `docker events`。目标连不上 /
+   * SSH 正在重连时，`acquire()` 可能卡上十几秒，浏览器那边却早已触发 `onopen`，界面
+   * 据此报「实时接收中」就是把「响应头」当成了「在收事件」（2026-10-11 用户现场）。
+   * 路由把它变成一帧 `ready`，客户端的绿点因此只在管道起来后才亮。
+   *
+   * **不保证一定回调**：`spawn` 失败（ENOENT）或 SSH 建连/开门失败都直接抛错，
+   * 调用方拿到的是 `error` 帧——那种情况本来就不该说「已就绪」。
+   */
+  onStart?(): void
 }
 
 /** 长流结束结果：自然退出给退出码，被中止（signal）时为 null。 */
@@ -1207,6 +1220,16 @@ export class RemoteExec {
       const channel = await this.openChannel(spec, command, DEFAULT_TIMEOUT_MS, 0)
       // 开门成功才可能发生「重连换条目」；开门抛错时条目仍是我占的那条，无需搬
       moveBusyToLive()
+      /*
+       * 管道就绪信号（见 StreamHandlers.onStart）：通道开出来了 = 远端真的开始跑这条
+       * 命令了。上面那两步可能很慢（`acquire()` 要建连 / 等池里那条；D150 的「远端
+       * 槽位满 → 重建连接」还会再来一轮），这段时间里宿主早已 flush 了 SSE 响应头。
+       *
+       * 建连**期间**也可能被中止（上面那次判定只覆盖 await 之前），所以这里要重判一次；
+       * 用一个函数读一次 `signal.aborted`，否则 TS 会拿上面那次的窄化结果报 TS2367。
+       */
+      const abortedWhileConnecting = (): boolean => signal?.aborted === true
+      if (!abortedWhileConnecting()) handlers.onStart?.()
 
       return await new Promise<StreamResult>((resolve, reject) => {
         const stdoutDecoder = new StringDecoder('utf8')
@@ -1844,6 +1867,15 @@ export function runLocalStream(argv: readonly string[], handlers: StreamHandlers
     child.stderr.on('data', (chunk: Buffer) => {
       const text = stderrDecoder.write(chunk)
       if (text !== '') handlers.onStderr(text)
+    })
+    /*
+     * 管道就绪信号（见 StreamHandlers.onStart）：`spawn` 是「进程真的起来了」的唯一
+     * 可信时点——它一定早于任何 stdout 分片，而 `spawn` 之前的等待（PATH 查找 /
+     * 系统调用）正是宿主 flush 了 SSE 响应头、浏览器却什么都还没拿到的那段时间。
+     */
+    child.once('spawn', () => {
+      if (settled) return
+      handlers.onStart?.()
     })
     child.once('error', (error: Error) => {
       if (settled) return

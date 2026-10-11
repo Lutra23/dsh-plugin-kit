@@ -92,6 +92,21 @@ export function subscribeLogStream(options) {
     options.onStatus?.('connecting')
     const next = new EventSource(buildUrl(tailNow))
     source = next
+    /*
+     * 「已就绪」只认两条证据（每次建流各自一份，见下）：
+     *   1. 宿主的 `ready` 帧 —— 管道（远端通道 / 子进程）真的起来了；
+     *   2. **第一行真实日志** —— 有数据就是更硬的证据，顺带兜住「宿主还是旧版本、
+     *      从不发 ready」的开发档错位（否则界面会永远停在「正在连接日志流…」）。
+     * `onopen` 一条都不算：它只证明 SSE 响应头到了。
+     */
+    let opened = false
+    const markOpen = () => {
+      if (opened) return
+      opened = true
+      attempt = 0
+      options.onStatus?.('open')
+      options.onOpen?.()
+    }
     next.addEventListener('line', (event) => {
       if (source !== next) return
       let payload = null
@@ -101,6 +116,7 @@ export function subscribeLogStream(options) {
         return
       }
       if (payload === null || typeof payload !== 'object') return
+      markOpen()
       if (typeof payload.d === 'string') options.onLine?.(payload.d)
       else if (typeof payload.e === 'string') options.onLine?.(payload.e)
     })
@@ -151,11 +167,18 @@ export function subscribeLogStream(options) {
       // 连接层错误：不再交给浏览器自动重连（它会重放 tail），改走手动重连
       reconnect()
     })
-    next.onopen = () => {
+    /*
+     * 宿主的 `ready` 帧（见 open 里的两条证据）。
+     *
+     * 注意 `ready` 也要走 `source !== next` 守卫：一个被换掉的旧连接可能在关掉之前
+     * 刚好把 ready 推过来，不挡就会把新连接的状态改成 open。
+     */
+    next.addEventListener('ready', () => {
       if (source !== next) return
-      attempt = 0
-      options.onStatus?.('open')
-      options.onOpen?.()
+      markOpen()
+    })
+    next.onopen = () => {
+      /* 响应头到了 ≠ 管道起来了：状态留在 connecting / reconnecting，等 ready 或第一行 */
     }
   }
 

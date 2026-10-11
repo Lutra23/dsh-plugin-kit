@@ -423,6 +423,9 @@ await test('GET /config：凭证脱敏 + 只读默认 + 复用 tty 连接簿名'
   assert.equal(config.dockerBin, fakeBin)
   assert.deepEqual(config.ttyBooks, ['prod-a'])
   assert.equal(config.ttyAvailable, true)
+  // SSE 帧协议版本：客户端据此决定「怎样才算已就绪」（2 = 管道起来先发 ready）——
+  // 旧宿主没有这个字段，开发档错位时新客户端靠它退回旧判据
+  assert.equal(config.streamProtocol, 2)
   assert.equal(JSON.stringify(config).includes('FAKE_PW'), false)
   for (const target of config.targets) {
     assert.equal(Object.hasOwn(target, 'password'), false)
@@ -500,6 +503,8 @@ await test('GET /logs/stream：SSE 事件序列（line stdout/stderr → end）'
   assert.equal(res.headers['cache-control'], 'no-cache')
   assert.equal(res.flushed, true)
   const text = res.frames.join('')
+  // 管道起来才发 ready，且必须排在第一条日志行前面（2026-10-11：响应头不算「在跟随」）
+  assert.match(text, /^event: ready\ndata: \{\}\n\n/)
   assert.match(text, /event: line\ndata: \{"d":"stdout line 1\\n"\}\n\n/)
   assert.match(text, /event: line\ndata: \{"e":"stderr line 1\\n"\}\n\n/)
   assert.match(text, /event: end\ndata: \{"reason":"container-exit","code":0\}\n\n/)
@@ -561,6 +566,8 @@ await test('GET /stats/stream：SSE 事件序列（stats → end stats-exit）',
   assert.equal(res.headers['cache-control'], 'no-cache')
   assert.equal(res.flushed, true)
   const text = res.frames.join('')
+  // 同一口径：管道起来先发 ready（响应头不算「在跟随」），再是采样
+  assert.match(text, /^event: ready\ndata: \{\}\n\n/)
   assert.match(text, /event: stats\ndata: \{"id":"9f2c1d4e5a6b"/)
   assert.match(text, /event: end\ndata: \{"reason":"stats-exit","code":0\}\n\n/)
   assert.equal(res.ended, true)
@@ -583,6 +590,8 @@ await test('GET /events/stream：SSE 事件序列（白名单过滤噪音 → en
   assert.equal(res.headers['content-type'], 'text/event-stream; charset=utf-8')
   assert.equal(res.flushed, true)
   const text = res.frames.join('')
+  // 同一口径：ready 在最前（事件流尤其要紧——旧代码这里靠响应头点亮绿点）
+  assert.match(text, /^event: ready\ndata: \{\}\n\n/)
   // 白名单放行 start / die；exec_start 那条噪音必须被服务端丢掉
   assert.match(text, /event: event\ndata: \{"action":"start","name":"shop-web-1","image":"nginx:1\.27","composeProject":"shop","time":1700000000\}/)
   assert.match(text, /event: event\ndata: \{"action":"die","name":"shop-web-1","image":"nginx:1\.27","time":1700000005,"exitCode":137\}/)
@@ -848,6 +857,8 @@ await test('GET /images/pull/stream：SSE 拉取进度（line → end pull-exit�
   assert.equal(res.headers['content-type'], 'text/event-stream; charset=utf-8')
   assert.equal(res.flushed, true)
   const text = res.frames.join('')
+  // 同一口径：docker pull 真起来了才发 ready，且排在逐层进度前面
+  assert.match(text, /^event: ready\ndata: \{\}\n\n/)
   assert.match(text, /event: line\ndata: \{"d":"Pulling from library\/nginx/)
   assert.match(text, /Status: Downloaded newer image for nginx:1.27/)
   assert.match(text, /event: end\ndata: \{"reason":"pull-exit","code":0,"ref":"nginx:1.27"\}\n\n/)

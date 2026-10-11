@@ -1999,6 +1999,27 @@ function canReconnectEvents(status) {
 }
 
 /**
+ * 这条宿主**会不会发 `ready` 帧**（`/config` 的 `streamProtocol`，见 src/index.ts）。
+ *
+ * 为什么需要版本协商：客户端半体与宿主半体同包同版本，正常永远一致；但开发档里会出现
+ * 「宿主进程还跑着旧代码（模块已在内存里）、浏览器却从磁盘读到新的 client.js」——旧宿主
+ * 从不发 `ready`，新客户端若死等就会把用户钉在「正在连接事件流…」上（2026-10-11 用户在
+ * test profile 上实测到：卡片能读到容器，活动条却永远在转）。
+ *
+ * 判据：
+ *   - `streamProtocol >= 2` → 发 ready（本版宿主）；
+ *   - 字段存在但更小（0 / 1）→ 老宿主：退回旧判据（响应头到了就算连上）；
+ *   - `config` 还没加载（null）→ 按**发 ready** 处理（真宿主一定会答 `/config`），
+ *     加载完成时由 Panel 里那段 effect 纠正（hostReadyFrameRef）。
+ *   - 字段整个缺失（比本包更老的宿主）→ 按「不发 ready」处理：它不可能有这帧。
+ */
+function hostSendsReadyFrame(config) {
+  if (config === null || typeof config !== 'object') return true
+  const value = Number(config.streamProtocol)
+  return Number.isFinite(value) ? value >= 2 : false
+}
+
+/**
  * 从事件流的 `error` 事件里解出**服务端给的原因**（D164）。
  *
  * 为什么必须解出来：这条流的 `event: error` 带着 data 时（服务端主动拒绝 / 收尾），原文案
@@ -3773,6 +3794,8 @@ window.__ModuleLoader__.load({
           let payload = null
           try { payload = JSON.parse(event.data) } catch { return }
           if (payload === null || typeof payload !== 'object') return
+          // 真的来了一个采样 = 管道在产数据：旧宿主（不发 ready）下这就是「已就绪」的证据
+          setStatsStatus('open')
           const cpu = typeof payload.cpuPercent === 'number' ? payload.cpuPercent : null
           const mem = typeof payload.memPercent === 'number' ? payload.memPercent : null
           setStats(payload)
@@ -3812,10 +3835,14 @@ window.__ModuleLoader__.load({
         es.addEventListener('stats', onStats)
         es.addEventListener('end', onEnd)
         es.addEventListener('error', onError)
-        es.onopen = () => {
+        /*
+         * 统计流的「已在跟随」同样只认 `ready`（宿主把 `docker stats` 真起来了）；
+         * `onopen` 只证明响应头到了，目标连不上时它会先亮成「实时跟随中（docker stats）」。
+         */
+        es.addEventListener('ready', () => {
           setStatsStatus('open')
           setStatsNotice('')
-        }
+        })
         return close
       }, [active, tab, statsFollow, props.target, item.id])
 
@@ -4665,6 +4692,8 @@ window.__ModuleLoader__.load({
           if (payload === null || typeof payload !== 'object') return
           const text = typeof payload.d === 'string' ? payload.d : (typeof payload.e === 'string' ? payload.e : '')
           if (text === '') return
+          // 真的来了逐层进度 = `docker pull` 在跑：旧宿主（不发 ready）下这就是就绪证据
+          setStatus('open')
           const merged = mergeProgress(linesRef.current, text, pendingRef.current)
           linesRef.current = merged.lines
           pendingRef.current = merged.pending
@@ -4699,7 +4728,8 @@ window.__ModuleLoader__.load({
         es.addEventListener('line', onLine)
         es.addEventListener('end', onEnd)
         es.addEventListener('error', onError)
-        es.onopen = () => setStatus('open')
+        // 拉取流同理：`ready` = 宿主的 `docker pull` 真起来了（onopen 只证明响应头到了）
+        es.addEventListener('ready', () => { setStatus('open') })
         return () => {
           close()
           pendingRef.current = ''
@@ -5902,6 +5932,18 @@ window.__ModuleLoader__.load({
       const eventsOpenedRef = useRef({ opened: false })
       /** 上一次建流时看到的**手动**重连令牌（D160）：用来认出「这次 effect 跑是用户点的重连」。 */
       const eventsReconnectRef = useRef(0)
+      /**
+       * 宿主会不会发 `ready` 帧（`/config` 的 `streamProtocol`，见 hostSendsReadyFrame）。
+       *
+       * 默认 true（config 还没加载时按新宿主）：旧宿主靠各自的兜底判据点亮，不会把用户钉在
+       * 「正在连接…」上。config 到达后由下面那段 effect 纠正。
+       */
+      const hostReadyFrameRef = useRef(true)
+      /**
+       * 事件流的响应头已经收到、但还没拿到「已就绪」（`ready`）——只用于「config 晚到、
+       * 而宿主是旧的」这种开发档错位：那种组合下要补一次重开，让 onopen 的回退判据生效。
+       */
+      const eventsLinkedRef = useRef(false)
       /** 打开中的容器详情：{ id, tab, item }（item 为快照，列表刷新后优先用新数据）。 */
       const [detail, setDetail] = usePanelState('detail', null)
       const [refreshToken, setRefreshToken] = useState(0)
@@ -6555,6 +6597,11 @@ window.__ModuleLoader__.load({
           let payload = null
           try { payload = JSON.parse(raw.data) } catch { return }
           if (payload === null || typeof payload !== 'object') return
+          /*
+           * 真的收到一条事件 = 管道在产数据，这是比 `ready` 更硬的证据（旧宿主 / 仿真宿主
+           * 没有 ready 帧时靠它点亮）。放在 lastEvent 更新之前无所谓：它只看状态。
+           */
+          if (eventsLinkedRef.current) applyEventsReady()
           setEvents((list) => pushEvent(list, payload, EVENT_BUFFER_LIMIT))
           debounced.schedule()
         }
@@ -6586,7 +6633,15 @@ window.__ModuleLoader__.load({
         es.addEventListener('event', onEvent)
         es.addEventListener('end', onEnd)
         es.addEventListener('error', onError)
-        es.onopen = () => {
+        /*
+         * 「连上了」与「真的在收事件」是两件事（2026-10-11 用户现场）：宿主是先把 SSE
+         * 响应头 flush 出去、**再**去起 `docker events`（见 src/index.ts 的
+         * `readyOnStart`），所以 `onopen` 只证明响应头到了——目标连不上 / SSH 正在重连时
+         * `acquire()` 可能卡十几秒，活动条却已经亮成绿色的「实时接收中（docker events）」。
+         * 现在绿点只认宿主那句「管道真的起来了」（`ready` 帧 ← StreamHandlers.onStart）。
+         */
+        const applyEventsReady = () => {
+          eventsLinkedRef.current = false
           setEventsStatus('open')
           // 连上了就说明上次那条拒绝原因已经过去（D164）：留着会让人以为现在还坏着
           setEventsRefused('')
@@ -6603,11 +6658,38 @@ window.__ModuleLoader__.load({
           hadOpen = true
           eventsOpenedRef.current.opened = true
         }
+        es.addEventListener('ready', applyEventsReady)
+        /*
+         * `onopen` 只说明「响应头到了」——除非**宿主是旧的**（/config 的 streamProtocol < 2，
+         * 或老到没有这个字段）：那种宿主从不发 `ready`，死等会永远停在「正在连接事件流…」。
+         * 那种组合下退回旧判据（响应头到了就算连上），并把 `eventsLinkedRef` 记上，
+         * 供 config 晚到时那段 effect 补一次重开（2026-10-11 用户在 test profile 上实测到）。
+         */
+        es.onopen = () => {
+          eventsLinkedRef.current = true
+          if (!hostReadyFrameRef.current) applyEventsReady()
+        }
         return () => {
+          eventsLinkedRef.current = false
           close()
           debounced.cancel()
         }
       }, [active, view, target, eventsReconnect])
+
+      /*
+       * 宿主版本协商（2026-10-11）：`streamProtocol < 2` 的宿主从不发 `ready`。
+       *
+       * config 正常在挂载时就到了（早于「选目标 → 建流」），那种情况下 events effect 里的
+       * `onopen` 直接走回退判据；这里只兜「config 晚于建流」的一拍：那时流已经收到响应头、
+       * 界面还停在「正在连接事件流…」，重开一次让 onopen 生效。只在版本**变化**时动手，
+       * 下一次 onopen 就会置 open，不会循环。
+       */
+      useEffect(() => {
+        const next = hostSendsReadyFrame(config)
+        if (hostReadyFrameRef.current === next) return
+        hostReadyFrameRef.current = next
+        if (!next && eventsLinkedRef.current) setEventsReconnect((value) => value + 1)
+      }, [config])
 
       useEffect(() => {
         if (notice === '') return undefined
@@ -8805,6 +8887,7 @@ window.__ModuleLoader__.load({
       debounce: makeDebounced,
       canReconnect: canReconnectEvents,
       errorMessage: eventsErrorMessage,
+      hostSendsReadyFrame,
     }
     /*
      * 同一类测试缝：总览的折叠逻辑与**正文渲染**都是纯函数（正文刻意写成普通函数而不是

@@ -682,6 +682,25 @@ describe('GET /logs/stream（SSE 路由）', () => {
     await pending2
   })
 
+  it('ready：管道真起来了（spawn）才发 —— 响应头不算「在跟随」（2026-10-11 现场）', async () => {
+    const { route } = mountPlugin()
+    const child = makeChild()
+    spawnMock.mockReturnValue(child)
+    const res = makeRes()
+    const pending = route.handler(makeReq(STREAM_PATH), res)
+    // 响应头已经出去了（浏览器 onopen 已触发），但 docker logs 还没起来
+    expect(res.flushed).toBe(true)
+    expect(res.frames).toEqual([])
+    child.emit('spawn')
+    expect(res.frames).toEqual([sseFrame('ready', {})])
+    child.stdout.emit('data', Buffer.from('hi\n'))
+    child.emit('close', 0)
+    await pending
+    // ready 在前、日志行在后：客户端按到达序点亮「实时跟随中」
+    expect(res.frames[0]).toBe(sseFrame('ready', {}))
+    expect(res.frames.some((one) => one.startsWith('event: line'))).toBe(true)
+  })
+
   it('背压不重写：越过高水位的帧只出现一次（D153 —— 老代码会在 drain 时重写同一帧）', async () => {
     vi.useFakeTimers()
     const { route } = mountPlugin()

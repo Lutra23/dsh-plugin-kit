@@ -1624,6 +1624,18 @@ const plugin = definePlugin<Config>({
         ttyBookHosts: [...books.entries()].map(([name, spec]) => ({ name, host: spec.host, port: spec.port })),
         ttyAvailable: books.size > 0,
         toolsRegistered: registeredNames,
+        /*
+         * SSE 帧协议版本（客户端据此决定「怎样才算已就绪」）。
+         *
+         * 2 = 四条流在**执行管道真的起来**时先发一帧 `ready`（见 readyOnStart）。客户端半体
+         * 与宿主半体同包同版本，正常不会错位；但开发档里「宿主进程还是旧代码（模块已在内存
+         * 里）、浏览器却从磁盘读到新的 client.js」这种组合会让新客户端死等一帧永远不来的
+         * `ready`，把界面钉在「正在连接事件流…」上（2026-10-11 用户在 test profile 上实测到）。
+         * 所以把版本放在这里：客户端读到 <2 就退回旧判据（响应头就算连上），读到 2 才只认
+         * `ready`。字段缺失（更老的宿主）由客户端按「发 ready」以外的规则兜底，见
+         * client-src/index.js 的 hostSendsReadyFrame。
+         */
+        streamProtocol: 2,
       }
     }
 
@@ -1651,6 +1663,17 @@ const plugin = definePlugin<Config>({
     /* ---------- 通用 SSE 长连接（三条流共用一份基建） ---------- */
 
     /**
+     * 「执行管道真的起来了」→ 一帧 `ready`（配合 {@link StreamHandlers.onStart}）。
+     *
+     * 为什么必须有这一帧：SSE 的 `onopen` **只证明响应头到了**——`openSseStream` 是先把
+     * 200 + `text/event-stream` flush 出去、再去起 `docker ...`。目标不可达 / SSH 正在
+     * 重连时 `acquire()` 可能卡十几秒，浏览器却已经「连上」了；客户端据此把活动条点亮成
+     * 绿色的「实时接收中（docker events）」，而那条流一个字都还没收到（2026-10-11 用户现场）。
+     * 现在客户端的 `open` 只认这帧，响应头不再算数。
+     */
+    const readyOnStart = (sendEvent: (event: string, data: unknown) => void): (() => void) => () => sendEvent('ready', {})
+
+    /**
      * 通用 SSE 长连接。日志流（`docker logs -f`）、统计流（`docker stats`）、
      * 拉取流（`docker pull`）三者只差「执行器 + 结束原因 + end 附加字段」，
      * 其余全部共用这一份实现：
@@ -1664,6 +1687,7 @@ const plugin = definePlugin<Config>({
      *   - 执行器抛错 → `error` 帧后关闭响应。
      *
      * 调用方负责「参数校验」——校验失败时写常规 JSON（4xx）并直接返回，不建流。
+     * 管道起来后要发的那帧 `ready` 见 {@link readyOnStart}（由调用方挂在 `onStart` 上）。
      */
     const openSseStream = async (
       res: ResLike,
@@ -3473,6 +3497,7 @@ const plugin = definePlugin<Config>({
             }, {
               onStdout: (chunk) => coalescer.push('d', chunk),
               onStderr: (chunk) => coalescer.push('e', chunk),
+              onStart: readyOnStart(sendEvent),
             }, signal)
             return result.code
           } finally {
@@ -3569,6 +3594,7 @@ const plugin = definePlugin<Config>({
               }
             },
             onStderr: (chunk) => sendEvent('line', { e: chunk }),
+            onStart: readyOnStart(sendEvent),
           }
           const result = await api.statsStream(safeIds, handlers, signal)
           // 收尾：最后一个对象可能还没闭合（进程退出前只写了半行），能解析就发
@@ -3633,6 +3659,7 @@ const plugin = definePlugin<Config>({
               if (pending.length > 64 * 1024) pending = pending.slice(-4096)
             },
             onStderr: (chunk) => sendEvent('line', { e: chunk }),
+            onStart: readyOnStart(sendEvent),
           }
           const result = await api.eventsStream(handlers, signal)
           // 收尾：最后一行可能没换行符（进程退出前只写半行），能解析就发
@@ -3706,6 +3733,7 @@ const plugin = definePlugin<Config>({
             const result = await api.pullStream(safeRef, {
               onStdout: (chunk) => coalescer.push('d', chunk),
               onStderr: (chunk) => coalescer.push('e', chunk),
+              onStart: readyOnStart(sendEvent),
             }, signal)
             auditCapabilityUse({ ...useFields, event: 'end', ok: true, durationMs: Date.now() - startedAt, reason: 'pull-exit', ...(result.code === null ? {} : { code: result.code }) })
             return result.code
