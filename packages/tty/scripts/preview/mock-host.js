@@ -53,6 +53,25 @@
       // 刻意**没有**任何隧道：验证「没配隧道时收进 ⋯ 更多」这条路径
       // （上面两条都有隧道，走的是常驻「隧道 N」按钮）
       { name: 'bare-host', host: 'bare.internal', port: 22, username: 'ops', auth: 'agent', keyPath: '', passphrase: '', password: '', agentForward: false, persist: false },
+      /*
+       * 唯一一条把「高级」三段**都配上**的条目（跳板机 + 代理命令 + 主机密钥别名）：
+       * `ssh-jump` 场景用它验折叠区的默认展开判据——配过却收起来，等于把配置藏了。
+       */
+      {
+        name: 'bastion-jump',
+        host: 'internal.corp',
+        port: 22,
+        username: 'deploy',
+        auth: 'key',
+        keyPath: '~/.ssh/id_ed25519',
+        passphrase: '',
+        password: '',
+        agentForward: false,
+        persist: false,
+        hostKeyAlias: 'corp-internal',
+        proxyCommand: 'ssh -W %h:%p bastion.corp',
+        jump: { host: 'bastion.corp', port: 2222 },
+      },
     ],
     hostKeys: [
       { host: '198.51.100.20', port: 22, fingerprint: 'SHA256:9xQ2mVr7Kp3sTf1cZbLd8uYwAe4nHjR6gPoXkMvQ2Bc' },

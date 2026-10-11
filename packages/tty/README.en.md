@@ -624,7 +624,14 @@ and the agent tools all reuse the same scheduling.
   same name overwrites; an empty name uses the hostname); the ✎ on a “+” menu entry and the **edit** in the
   settings card use the **same form** — three grouped sections (connection / authentication / options) plus
   credential storage, the credential-reference picker, “test connection” and “File Browser”, renaming
-  supported and duplicate names rejected. The only difference is **how it is submitted**: the menu dialog
+  supported and duplicate names rejected. The “Book name” row is **always visible** (0.31.0): typing a name
+  **automatically ticks** “save to connection book”, clearing it **automatically unticks**, and unticking by
+  hand clears the name too — what a click will save is always what the form shows. The dialog itself is a
+  **three-part shell** (0.31.0): the title
+  and the bottom action row are pinned and **only the middle scrolls**; the low-frequency items (jump host /
+  proxy command / host key alias) live in an “**Advanced**” disclosure that starts expanded when the entry
+  actually has them and collapsed otherwise (when collapsed, that row names what is configured — it is not a
+  black box). The only difference is **how it is submitted**: the menu dialog
   (“save changes” / “connect (and save)”) writes through immediately, while the settings card commits into the
   card's form with “apply” and persists with the card's “save”;
 - **Authentication (auth), one of three**:

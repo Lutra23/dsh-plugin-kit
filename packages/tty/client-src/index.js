@@ -83,6 +83,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import xtermCss from '@xterm/xterm/css/xterm.css'
 import ttyCss from './tty.css'
 import { formatJumpShorthand, parseJumpShorthand } from './jump-field.js'
+import { checkedForBookName, nameForBookChecked } from './save-book.js'
 import { resolveDockOwner, dockPaneVisible } from './dock-owner.js'
 import { deriveWsUrl } from './ws-url.js'
 import { asciiRefToken, derivedCredentialRef } from './credential-ref.js'
@@ -230,14 +231,16 @@ const I18N_ZH = {
   'check.jumpOwnCred': '跳板机使用独立凭据',
   'field.jumpUsername': '跳板机用户名（留空沿用目标）',
   'field.jumpAuth': '跳板机认证方式（留空沿用目标）',
-  'hint.jumpInherit': '留空凭据 = 沿用上面那台主机的认证方式与钥匙；跳板机连不上时错误文案会点名它（不会伪装成目标超时）。',
+  'hint.jumpInherit': '留空凭据 = 沿用目标那台主机的认证方式与钥匙。',
+  'hint.jumpInheritFull': '留空凭据 = 沿用上面那台主机的认证方式与钥匙；跳板机连不上时错误文案会点名它（不会伪装成目标超时）。',
   'meta.jumpStage': '跳板机 {label}',
   'meta.viaJump': '⇢ 经 {label}',
   'meta.viaProxy': '⇢ 经代理命令',
   'section.proxyCommand': '代理命令',
   'field.proxyCommand': '代理命令（ProxyCommand，留空 = 不用）',
   'placeholder.proxyCommand': '例如 ssh -W %h:%p bastion',
-  'hint.proxyCommand': '本机执行的命令，它的 stdin/stdout 就是到目标的 SSH 传输（等价于 OpenSSH 的 ProxyCommand）。支持 %h 目标主机、%p 端口、%r 用户名、%n 主机、%% 字面 %；其余写法原样保留。与跳板机同时填时跳板机优先（OpenSSH 语义）。需要下面那个开关，~/.ssh/config 导入不会自动带入它。',
+  'hint.proxyCommand': '本机命令，stdin/stdout 即到目标的 SSH 传输；与跳板机同填时跳板机优先。',
+  'hint.proxyCommandFull': '本机执行的命令，它的 stdin/stdout 就是到目标的 SSH 传输（等价于 OpenSSH 的 ProxyCommand）。支持 %h 目标主机、%p 端口、%r 用户名、%n 主机、%% 字面 %；其余写法原样保留。与跳板机同时填时跳板机优先（OpenSSH 语义）。需要下面那个开关，~/.ssh/config 导入不会自动带入它。',
   'hint.proxyCommandDisabled': '⚠ 当前「允许 ProxyCommand」未打开：这条命令不会执行，连接会明确失败（不会退回直连）。到 插件配置 → 终端面板 打开开关后生效。',
   'hint.proxyCommandNotGranted': '⚠ 这条能力未获宿主授权：点这个开关会就地发起一次授权（面板给一条在宿主终端执行的命令，免重启）；也可以走最严的那条——在「启动 dsh 的那个环境」里 export DSH_TTY_ALLOW_PROXY_COMMAND=1 后重启宿主（启动之后再设不算授权）。这样安排是因为跨站页面与页内脚本都能发回环请求——若配置界面能凭空提权，这道闸门等于没有；关掉它则随时可用。',
   'badge.notEffective': '未生效：未获宿主授权',
@@ -299,8 +302,12 @@ const I18N_ZH = {
   'hint.noCredRefPassphrase': '还没有别的连接用过凭据引用 — 可在私钥口令框直接手输 env:NAME',
   'hint.noCredRefPassword': '还没有别的连接用过凭据引用 — 勾上面的「保存时存入凭据存储」新建一个，或直接在密码框手输 env:NAME',
   'section.options': '选项',
+  'section.advanced': '高级',
+  'hint.advanced': '跳板机 · 代理命令 · 主机密钥别名',
+  'meta.advancedConfigured': '已配置：{items}',
   'check.agentForward': 'agent forwarding（远程可用本地 ssh-agent 钥匙，如远程 git clone）',
-  'hint.hostKeyAlias': '留空 = 按主机地址记住指纹。同一台主机经不同地址（跳板机后 / 端口转发）触达时，填同一个别名可让它们共用一条主机密钥记录，避免每次切换地址都报「指纹变更」；只影响指纹记在哪，不改连接地址',
+  'hint.hostKeyAlias': '留空 = 按主机地址；同一主机经多地址触达时填别名可共用指纹记录。',
+  'hint.hostKeyAliasFull': '留空 = 按主机地址记住指纹。同一台主机经不同地址（跳板机后 / 端口转发）触达时，填同一个别名可让它们共用一条主机密钥记录，避免每次切换地址都报「指纹变更」；只影响指纹记在哪，不改连接地址',
   'placeholder.hostKeyAlias': '留空 = 按主机地址',
   'check.persist': '持久会话（tmux 托管，断线/重启后恢复现场；远程需安装 tmux）',
   'check.saveToBook': '保存到连接簿（同名覆盖）',
@@ -673,14 +680,16 @@ const I18N_EN = {
   'check.jumpOwnCred': 'Use separate credentials for the jump host',
   'field.jumpUsername': 'Jump host user (empty = same as the target)',
   'field.jumpAuth': 'Jump host auth (empty = same as the target)',
-  'hint.jumpInherit': 'Empty credentials reuse the target host’s auth method and keys. When the jump host itself is unreachable the error names it (it will not masquerade as a target timeout).',
+  'hint.jumpInherit': 'Empty credentials reuse the target host’s auth method and keys.',
+  'hint.jumpInheritFull': 'Empty credentials reuse the target host’s auth method and keys. When the jump host itself is unreachable the error names it (it will not masquerade as a target timeout).',
   'meta.jumpStage': 'Jump host {label}',
   'meta.viaJump': '⇢ via {label}',
   'meta.viaProxy': '⇢ via proxy command',
   'section.proxyCommand': 'Proxy command',
   'field.proxyCommand': 'Proxy command (ProxyCommand; empty = unused)',
   'placeholder.proxyCommand': 'e.g. ssh -W %h:%p bastion',
-  'hint.proxyCommand': 'A command run on this machine whose stdin/stdout become the SSH transport to the target (the same idea as OpenSSH’s ProxyCommand). Supports %h host, %p port, %r user, %n host and %% for a literal %; anything else is left as written. If a jump host is set too, the jump host wins (OpenSSH semantics). It needs the switch below, and importing ~/.ssh/config never fills it in.',
+  'hint.proxyCommand': 'A command on this machine whose stdin/stdout become the SSH transport; a jump host wins if both are set.',
+  'hint.proxyCommandFull': 'A command run on this machine whose stdin/stdout become the SSH transport to the target (the same idea as OpenSSH’s ProxyCommand). Supports %h host, %p port, %r user, %n host and %% for a literal %; anything else is left as written. If a jump host is set too, the jump host wins (OpenSSH semantics). It needs the switch below, and importing ~/.ssh/config never fills it in.',
   'hint.proxyCommandDisabled': '⚠ “Allow ProxyCommand” is off right now: this command will not run and the connection fails explicitly (it does not fall back to a direct connection). Turn it on in Plugin settings → Terminal panel.',
   'hint.proxyCommandNotGranted': '⚠ Not granted by the host: clicking this switch starts a grant in place (the panel shows one command to run in a terminal on the host — no restart), or use the strictest route — export DSH_TTY_ALLOW_PROXY_COMMAND=1 in the environment that launched dsh and restart the host (setting it after launch does not count). The reason: cross-site pages and in-page scripts can both send loopback requests, so if the settings UI could raise it out of thin air this gate would be pointless. Turning it off always works.',
   'badge.notEffective': 'Not effective: not granted by the host',
@@ -742,8 +751,12 @@ const I18N_EN = {
   'hint.noCredRefPassphrase': 'No other connection uses a credential reference yet — you can type env:NAME straight into the passphrase box',
   'hint.noCredRefPassword': 'No other connection uses a credential reference yet — check “Store in the credential store on save” above to create one, or type env:NAME straight into the password box',
   'section.options': 'Options',
+  'section.advanced': 'Advanced',
+  'hint.advanced': 'Jump host · Proxy command · Host key alias',
+  'meta.advancedConfigured': 'Configured: {items}',
   'check.agentForward': 'agent forwarding (the remote side can use local ssh-agent keys, e.g. remote git clone)',
-  'hint.hostKeyAlias': 'Empty = pin the fingerprint by host address. When one host is reached through different addresses (behind a bastion / via port forwarding), give them the same alias so they share one host-key record instead of reporting a fingerprint change on every switch; it only decides where the fingerprint is stored, never the connection address',
+  'hint.hostKeyAlias': 'Empty = pin by host address; one alias shares a fingerprint record across addresses.',
+  'hint.hostKeyAliasFull': 'Empty = pin the fingerprint by host address. When one host is reached through different addresses (behind a bastion / via port forwarding), give them the same alias so they share one host-key record instead of reporting a fingerprint change on every switch; it only decides where the fingerprint is stored, never the connection address',
   'placeholder.hostKeyAlias': 'Empty = by host address',
   'check.persist': 'Persistent session (hosted by tmux, survives a disconnect/restart; tmux must be installed on the remote)',
   'check.saveToBook': 'Save to the host book (overwrite the same name)',
@@ -1278,6 +1291,20 @@ const ICON_ARROW_LEFT =
   '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.6 8h-9"/><path d="M6.8 4.8L3.6 8l3.2 3.2"/></svg>'
 const ICON_ARROW_DOWN =
   '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3.4v9"/><path d="M4.8 9.2L8 12.4l3.2-3.2"/></svg>'
+/*
+ * 「高级」折叠区的展开图标：**逐字对齐宿主 `dsh-client-ui-primitives` 的
+ * `IconChevronRightOutlineRegular` / `IconChevronDownOutlineRegular`**（viewBox 16、
+ * `stroke-width: 1`、`stroke: currentColor`、无 `linecap/linejoin`、默认 14px）。
+ * 官方在 provider 卡片的「自定义设置」上就是这一对：**收起 = 右尖括号、展开 = 下尖括号**。
+ *
+ * 本包其余 16 网格图标走 1.5 / 1.6 线宽 + 圆头（那是面板自己的语言），这里刻意不套用——
+ * 用户的原话是「展开图标和 dsh 官方的图标保持一致」，而 disclosure 的图标是**宿主的**语言。
+ * 判据钉在 `test/ssh-dialog-shell.test.ts`（路径逐字比对），改动前先回头对宿主那份。
+ */
+const ICON_CHEVRON_RIGHT =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M6 12L9.29289 8.70711C9.68342 8.31658 9.68342 7.68342 9.29289 7.29289L6 4"/></svg>'
+const ICON_CHEVRON_DOWN =
+  '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true"><path d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6"/></svg>'
 const ICON_SERVER =
   '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.4" y="3.2" width="11.2" height="4" rx="1.2"/><rect x="2.4" y="8.8" width="11.2" height="4" rx="1.2"/><path d="M5 5.2h.01"/><path d="M5 10.8h.01"/></svg>'
 // 状态 / 提示
@@ -4761,11 +4788,25 @@ function openSshDialog(entry) {
   const card = document.createElement('div')
   card.className = 'tt_sshCard'
 
+  /*
+   * 三段式外壳（0.31.0）：**标题与底部动作行固定，只有中间的表单滚**。
+   *
+   * 此前 `.tt_sshCard` 自己就是滚动容器（`overflow-y: auto`），于是标题和「连接 / 保存修改」
+   * 一起被滚走——实测 1680×1050 下打开对话框，底部按钮初始**根本不在视口里**，用户得先滚一屏
+   * 才找得到「连接」。现在滚动条只归 `.tt_sshBody`，头尾各 `flex: none`（见 tty.css）。
+   */
+  const head = document.createElement('div')
+  head.className = 'tt_sshHead'
+  const body = document.createElement('div')
+  body.className = 'tt_sshBody'
+  const foot = document.createElement('div')
+  foot.className = 'tt_sshFoot'
+
   const title = document.createElement('div')
   title.className = 'tt_sshTitle'
   title.innerHTML = ICON_KEY + '<span></span>'
   title.lastElementChild.textContent = isEdit ? t('panel.editConnection', { name: String(editing.name ?? '') }) : t('panel.sshConnect')
-  card.appendChild(title)
+  head.appendChild(title)
 
   /** 表单分组小标题：把「连接 / 认证 / 选项」三段分开，长表单不再糊成一片。 */
   const sectionLabel = (text) => {
@@ -4805,15 +4846,15 @@ function openSshDialog(entry) {
     return row
   }
 
-  card.appendChild(sectionLabel(t('section.connection')))
+  body.appendChild(sectionLabel(t('section.connection')))
   const grid = document.createElement('div')
   grid.className = 'tt_sshGrid'
   grid.appendChild(fieldRow('host', t('field.host'), { placeholder: t('placeholder.host') }))
   grid.appendChild(fieldRow('port', t('field.port'), { placeholder: '22' }))
-  card.appendChild(grid)
-  card.appendChild(fieldRow('username', t('field.username'), { placeholder: 'root' }))
-  card.appendChild(sectionLabel(t('section.auth')))
-  card.appendChild(fieldRow('auth', t('field.authMethod'), {
+  body.appendChild(grid)
+  body.appendChild(fieldRow('username', t('field.username'), { placeholder: 'root' }))
+  body.appendChild(sectionLabel(t('section.auth')))
+  body.appendChild(fieldRow('auth', t('field.authMethod'), {
     select: [
       { value: 'agent', label: t('option.authAgent') },
       { value: 'key', label: t('option.authKey') },
@@ -5121,21 +5162,78 @@ function openSshDialog(entry) {
     passwordEnv.setNames(names)
   })()
 
-  card.appendChild(keyRow)
-  card.appendChild(passphraseRow)
-  card.appendChild(passphraseEnv.row)
-  card.appendChild(passwordRow)
-  card.appendChild(passwordCred.row)
-  card.appendChild(passwordEnv.row)
+  body.appendChild(keyRow)
+  body.appendChild(passphraseRow)
+  body.appendChild(passphraseEnv.row)
+  body.appendChild(passwordRow)
+  body.appendChild(passwordCred.row)
+  body.appendChild(passwordEnv.row)
+
+  /*
+   * 「高级」折叠区（0.31.0）：跳板机 / 代理命令 / 主机密钥别名三块都是**配一次就不动**的
+   * 低频项，平铺在表单里会把常用字段（主机 / 用户名 / 认证 / 保存）挤出一屏——实测
+   * 1680×1050 下打开对话框，连底部动作行都在视口之外。收起后默认可见区只剩
+   * 连接 / 认证 / 选项三段。
+   *
+   * **默认展开的判据是「条目里真的配过」**（`advancedSummary()`；真正的调用点在编辑态回填
+   * 之后那次 `setAdvancedOpen(...)`）：编辑一个带跳板机的条目却把跳板机藏起来，那种
+   * 「看不见的配置」比长表单更糟——用户改了目标却不知道跳板机还在。收起时那一行元信息
+   * 会点名里面配了什么，不至于变成暗盒。
+   */
+  const advToggle = document.createElement('button')
+  advToggle.type = 'button'
+  advToggle.className = 'tt_sshAdvToggle'
+  advToggle.title = t('hint.advanced')
+  const advChevron = document.createElement('span')
+  advChevron.className = 'tt_sshAdvChevron'
+  advChevron.innerHTML = ICON_CHEVRON_RIGHT
+  const advText = document.createElement('span')
+  advText.className = 'tt_sshAdvText'
+  advText.textContent = t('section.advanced')
+  const advMeta = document.createElement('span')
+  advMeta.className = 'tt_sshAdvMeta'
+  advToggle.appendChild(advChevron)
+  advToggle.appendChild(advText)
+  advToggle.appendChild(advMeta)
+  const advBody = document.createElement('div')
+  advBody.className = 'tt_sshAdvBody'
+
+  /** 折叠区的三段各自「配了没有」，用于元信息与默认展开判据（空串 / 空对象都算没配）。 */
+  const advancedSummary = () => {
+    const parts = []
+    if (parseJumpShorthand(fields.jumpHost.value) !== undefined) parts.push(t('section.jump'))
+    if (fields.proxyCommand.value.trim() !== '') parts.push(t('section.proxyCommand'))
+    if (fields.hostKeyAlias.value.trim() !== '') parts.push(t('field.hostKeyAlias'))
+    return parts
+  }
+  const syncAdvanced = () => {
+    const open = advBody.hidden === false
+    advToggle.setAttribute('aria-expanded', open ? 'true' : 'false')
+    // 图标与宿主同一对：收起 = 右尖括号、展开 = 下尖括号（见 ICON_CHEVRON_* 的注释）
+    advChevron.innerHTML = open ? ICON_CHEVRON_DOWN : ICON_CHEVRON_RIGHT
+    const parts = advancedSummary()
+    // 收起时点名「里面配了什么」；没配就写清这一段是干什么的（否则一个「高级」按钮等于暗盒）
+    advMeta.textContent = parts.length > 0
+      ? t('meta.advancedConfigured', { items: parts.join(' · ') })
+      : t('hint.advanced')
+  }
+  const setAdvancedOpen = (open) => {
+    advBody.hidden = !open
+    syncAdvanced()
+  }
+  advToggle.addEventListener('click', () => setAdvancedOpen(advBody.hidden === true))
+  // 初始收起即可（此时 fields.* 还没建完，syncAdvanced 不能在这里跑——它要读那些字段）
+  advBody.hidden = true
+  advToggle.setAttribute('aria-expanded', 'false')
 
   /*
    * 跳板机（ProxyJump 单跳）。界面只给一个输入框（`[用户@]主机[:端口]`，与 OpenSSH 的写法
    * 一致），凭据默认沿用目标那一跳——企业内网里通常共用一把钥匙或同一个 agent，所以绝大
    * 多数情况只填这一行。勾掉「使用独立凭据」才展开覆盖字段。
    */
-  card.appendChild(sectionLabel(t('section.jump')))
+  advBody.appendChild(sectionLabel(t('section.jump')))
   const jumpHostRow = fieldRow('jumpHost', t('field.jumpHost'), { placeholder: t('placeholder.jumpHost') })
-  card.appendChild(jumpHostRow)
+  advBody.appendChild(jumpHostRow)
   const jumpOwnRow = document.createElement('label')
   jumpOwnRow.className = 'tt_sshRow'
   // 与卡片里其它开关同一档：16×16 + 官方中性 brand 的选中色 + 焦点环（.tt_cardCheckbox）。
@@ -5148,7 +5246,7 @@ function openSshDialog(entry) {
   jumpOwnText.textContent = t('check.jumpOwnCred')
   jumpOwnRow.appendChild(jumpOwnCheck)
   jumpOwnRow.appendChild(jumpOwnText)
-  card.appendChild(jumpOwnRow)
+  advBody.appendChild(jumpOwnRow)
   const jumpUsernameRow = fieldRow('jumpUsername', t('field.jumpUsername'), { placeholder: 'root' })
   const jumpAuthRow = fieldRow('jumpAuth', t('field.jumpAuth'), {
     select: [
@@ -5161,11 +5259,13 @@ function openSshDialog(entry) {
   const jumpKeyRow = fieldRow('jumpKeyPath', t('field.keyPath'), { placeholder: '~/.ssh/id_ed25519' })
   const jumpPassphraseRow = fieldRow('jumpPassphrase', t('field.passphrase'), { type: 'password' })
   const jumpPasswordRow = fieldRow('jumpPassword', t('field.password'), { type: 'password' })
-  for (const row of [jumpUsernameRow, jumpAuthRow, jumpKeyRow, jumpPassphraseRow, jumpPasswordRow]) card.appendChild(row)
+  for (const row of [jumpUsernameRow, jumpAuthRow, jumpKeyRow, jumpPassphraseRow, jumpPasswordRow]) advBody.appendChild(row)
   const jumpHint = document.createElement('div')
   jumpHint.className = 'tt_cardHint'
   jumpHint.textContent = t('hint.jumpInherit')
-  card.appendChild(jumpHint)
+  // 完整说明进悬浮（可见那行压到一句）——与代理命令、主机密钥别名两处同一处理
+  jumpHint.title = t('hint.jumpInheritFull')
+  advBody.appendChild(jumpHint)
 
   /*
    * 代理命令（ProxyCommand）。与跳板机同属「怎么到达目标」，但**信任级完全不同**：
@@ -5176,17 +5276,28 @@ function openSshDialog(entry) {
    * 「我明明填过为什么没反应」。真正的闸门在宿主侧（关着时连接明确失败，不退回直连），
    * 这里的文案只是提前把话说清楚。
    */
-  card.appendChild(sectionLabel(t('section.proxyCommand')))
+  advBody.appendChild(sectionLabel(t('section.proxyCommand')))
   const proxyCommandRow = fieldRow('proxyCommand', t('field.proxyCommand'), { placeholder: t('placeholder.proxyCommand') })
-  card.appendChild(proxyCommandRow)
+  advBody.appendChild(proxyCommandRow)
   const proxyHint = document.createElement('div')
   proxyHint.className = 'tt_cardHint'
   proxyHint.textContent = t('hint.proxyCommand')
-  card.appendChild(proxyHint)
+  proxyHint.title = t('hint.proxyCommandFull')
+  advBody.appendChild(proxyHint)
   const proxyGateHint = document.createElement('div')
   proxyGateHint.className = 'tt_cardHint tt_sshProbeWarn'
   proxyGateHint.textContent = t('hint.proxyCommandDisabled')
-  card.appendChild(proxyGateHint)
+  advBody.appendChild(proxyGateHint)
+  /*
+   * HostKeyAlias（0.25.0）：只改主机指纹**记在哪条记录里**，不改连接地址。归入「高级」
+   * ——它是排查 TOFU 假告警（同一台机经不同地址触达）时才想起来改的字段。
+   */
+  advBody.appendChild(fieldRow('hostKeyAlias', t('field.hostKeyAlias'), { placeholder: t('placeholder.hostKeyAlias') }))
+  const aliasHint = document.createElement('span')
+  aliasHint.className = 'tt_cardHint'
+  aliasHint.textContent = t('hint.hostKeyAlias')
+  aliasHint.title = t('hint.hostKeyAliasFull')
+  advBody.appendChild(aliasHint)
   /**
    * 闸门提示只在「填了命令 + 现在不会生效」时出现；文案按**原因**二选一：
    *   - 未获宿主授权 → 说清设哪个环境变量 + 要重启（那个开关在设置卡片里是点不动的）；
@@ -5256,7 +5367,7 @@ function openSshDialog(entry) {
   fields.jumpAuth.addEventListener('change', syncJumpRows)
   jumpOwnCheck.addEventListener('change', syncJumpRows)
 
-  card.appendChild(sectionLabel(t('section.options')))
+  body.appendChild(sectionLabel(t('section.options')))
   const fwdRow = document.createElement('label')
   fwdRow.className = 'tt_cardRow'
   const fwdCheck = document.createElement('input')
@@ -5267,17 +5378,7 @@ function openSshDialog(entry) {
   fwdLabel.textContent = t('check.agentForward')
   fwdRow.appendChild(fwdCheck)
   fwdRow.appendChild(fwdLabel)
-  card.appendChild(fwdRow)
-
-  /*
-   * HostKeyAlias（0.25.0）：只改主机指纹**记在哪条记录里**，不改连接地址。放在「选项」段
-   * ——它是排查 TOFU 假告警（同一台机经不同地址触达）时才想起来改的字段。
-   */
-  card.appendChild(fieldRow('hostKeyAlias', t('field.hostKeyAlias'), { placeholder: t('placeholder.hostKeyAlias') }))
-  const aliasHint = document.createElement('span')
-  aliasHint.className = 'tt_cardHint'
-  aliasHint.textContent = t('hint.hostKeyAlias')
-  card.appendChild(aliasHint)
+  body.appendChild(fwdRow)
 
   // 持久会话（0.10.0，宿主 persistence=tmux 时显示）：远程 tmux 托管，断线/
   // 宿主重启后重开即恢复；随连接簿条目保存
@@ -5293,7 +5394,7 @@ function openSshDialog(entry) {
   persistRow.appendChild(persistLabel)
   // 设置开关是唯一开关：开启时默认勾选（可对单次连接取消）
   persistCheck.checked = persistenceCache === 'tmux'
-  if (persistenceCache === 'tmux') card.appendChild(persistRow)
+  if (persistenceCache === 'tmux') body.appendChild(persistRow)
 
   const saveRow = document.createElement('label')
   saveRow.className = 'tt_cardRow'
@@ -5305,22 +5406,37 @@ function openSshDialog(entry) {
   saveLabel.textContent = t('check.saveToBook')
   saveRow.appendChild(saveCheck)
   saveRow.appendChild(saveLabel)
-  card.appendChild(saveRow)
+  body.appendChild(saveRow)
   const nameRow = fieldRow('name', t('field.bookName'), { placeholder: t('placeholder.bookName') })
-  nameRow.style.display = 'none'
-  card.appendChild(nameRow)
+  /*
+   * 名称行**常显**（0.31.0，用户原话「这个默认展开吧」）：从前要**先勾上勾选框**才出现这一行，
+   * 想改个名字得先勾、再回头找它。现在勾选状态由名字决定（规则见 `save-book.js` 的文件头）：
+   * 填了名字自动勾上、清空自动取消、手动取消连名字一起清掉（不留「名字还在但不会保存」的悬空态）。
+   */
+  body.appendChild(nameRow)
+  // 「高级」折叠区排在常用段之后：收起时它就是表单的最后一行，展开的那几段也仍然在
+  // 「选项」之下（顺序不变，只是默认不占高度）
+  body.appendChild(advToggle)
+  body.appendChild(advBody)
   saveCheck.addEventListener('change', () => {
-    nameRow.style.display = saveCheck.checked ? '' : 'none'
-    if (saveCheck.checked && fields.name.value.trim() === '' && fields.host.value.trim() !== '') {
-      fields.name.value = fields.host.value.trim()
-    }
+    fields.name.value = nameForBookChecked(saveCheck.checked, fields.name.value, fields.host.value)
     if (saveCheck.checked) fields.name.focus()
   })
+  /*
+   * 只在新连接那条路上接「填名字 = 要保存」：**编辑模式不能接**。
+   * 编辑态那一行是「这本书条目自己的名字」，连接按钮走的是「不保存、直接连」那条路；
+   * 要是打字顺手把 `saveCheck.checked` 顶成 true，点「连接」就会拿这个名字去**同名覆盖**写回
+   * 配置（等于开一次对话框就潜在地改一次配置）——那不是用户要的。
+   */
+  if (!isEdit) {
+    fields.name.addEventListener('input', () => {
+      saveCheck.checked = checkedForBookName(fields.name.value)
+    })
+  }
   // 编辑模式：不勾选保存，直接以「保存修改」写回连接簿（名称字段常驻可改名）
   if (isEdit) {
     saveRow.style.display = 'none'
     fields.name.value = String(editing.name ?? '')
-    nameRow.style.display = ''
     fields.host.value = String(editing.host ?? '')
     fields.port.value = String(editing.port ?? 22)
     fields.username.value = String(editing.username ?? '')
@@ -5363,8 +5479,16 @@ function openSshDialog(entry) {
   probeEl.className = 'tt_sshProbeResult'
   statusEl.appendChild(errorEl)
   statusEl.appendChild(probeEl)
-  card.appendChild(statusEl)
+  foot.appendChild(statusEl)
   syncJumpRows()
+  /*
+   * 折叠区的初始态在这里定稿（此时 fields.* 全部就位、编辑态也回填完了）：
+   * **条目里真的配过才展开**——新建连接与空条目一律收起，省掉一整屏。
+   */
+  setAdvancedOpen(advancedSummary().length > 0)
+  for (const advancedField of [fields.jumpHost, fields.proxyCommand, fields.hostKeyAlias]) {
+    advancedField.addEventListener('input', syncAdvanced)
+  }
 
   /**
    * HostKeyAlias（0.25.0）：空串 = 不给这个字段（宿主侧「没写」= 按 host 定位）。
@@ -5564,7 +5688,7 @@ function openSshDialog(entry) {
   })
   actionsSecondary.appendChild(probeBtn)
   actionsPrimary.appendChild(connectBtn)
-  card.appendChild(actions)
+  foot.appendChild(actions)
 
   const syncAuthRows = () => {
     keyRow.style.display = fields.auth.value === 'key' ? '' : 'none'
@@ -5677,6 +5801,9 @@ function openSshDialog(entry) {
     })()
   })
 
+  card.appendChild(head)
+  card.appendChild(body)
+  card.appendChild(foot)
   backdrop.appendChild(card)
   document.body.appendChild(backdrop)
   sshDialogEl = backdrop
@@ -10084,7 +10211,8 @@ function TtySettingsCard(props) {
           jsx('span', { className: 'tt_cardLabel', children: t('check.agentForward') }),
         ] }),
         editField(t('field.hostKeyAlias'), 'hostKeyAlias', t('placeholder.hostKeyAlias')),
-        jsx('span', { className: 'tt_cardHint', children: t('hint.hostKeyAlias') }),
+        // 可见那行压到一句，完整说明进悬浮（对话框里同一处同款处理）
+        jsx('span', { className: 'tt_cardHint', title: t('hint.hostKeyAliasFull'), children: t('hint.hostKeyAlias') }),
         // 条目级持久化：只在设置里开着 tmux 持久化时才有意义（与对话框同款条件）；没写过的条目
         // 跟随全局开关，显式取消过（persist:false）的条目保持取消——「+」菜单按这个值决定是否托管
         persistenceCache === 'tmux'

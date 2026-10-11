@@ -13,6 +13,7 @@
  *   node scripts/preview.mjs --build            # 顺带重建 client.js（默认不重建，产物落后直接报错）
  *   node scripts/preview.mjs --theme=light      # 浅色主题
  *   node scripts/preview.mjs --width=560        # 压窄视口走查窄容器排版（默认 1680）
+ *   node scripts/preview.mjs --height=560       # 压矮视口走查「内容溢出时头尾还固不固定」（默认 1050）
  *   PREVIEW_CHROME_ARGS=--no-sandbox node scripts/preview.mjs   # 受限沙箱 / CI 里 Chrome 起不来时
  *
  * 需要本机有 Chrome/Chromium（默认找 playwright 缓存的 Chrome for Testing，
@@ -47,6 +48,12 @@ const shotsDir = join(previewDir, outName)
  */
 const viewportWidth = Number((argv.find((a) => a.startsWith('--width=')) || '--width=1680').split('=')[1]) || 1680
 /**
+ * 视口高度（默认 1050）。**与连接对话框的「头尾固定」直接相关**：那张卡片是
+ * `max-height: 86vh`，矮视口下内容才会溢出中段——1050px 高时展开态刚好塞得下，
+ * 「滚到底头尾还在不在」这条断言就永远走不到。走查时用 `--height=560` 压矮。
+ */
+const viewportHeight = Number((argv.find((a) => a.startsWith('--height=')) || '--height=1050').split('=')[1]) || 1050
+/**
  * 额外 Chrome 参数（空格分隔）。受限环境（文件沙箱 / CI 容器）里 Chrome 自己的
  * sandbox 起不来，CDP 会一直卡在 `Page.enable` 直到超时——此时用
  * `PREVIEW_CHROME_ARGS=--no-sandbox`。刻意不做默认：那会削弱所有调用方的隔离。
@@ -65,6 +72,9 @@ const SCENARIOS = [
   ['ssh', 'SSH 连接对话框'],
   ['ssh-probe', 'SSH 连接对话框（试连结果）'],
   ['ssh-edit', 'SSH 连接对话框（编辑）'],
+  ['ssh-save-book', 'SSH 连接对话框：连接簿名称行常显 + 填名字自动勾上'],
+  ['ssh-adv', 'SSH 连接对话框：「高级」展开 + 中段滚动（头尾固定）'],
+  ['ssh-jump', 'SSH 连接对话框：配过高级项的条目默认展开折叠区'],
   ['settings', '设置卡片'],
   ['settings-assist', '设置卡片：AI 辅助小节（默认关 + 模型路由一个控件）'],
   ['settings-shell', '设置卡片：Shell 路径候选表（浮层，不顶动卡片布局）'],
@@ -547,7 +557,7 @@ async function main() {
   await ensureVendor()
   log('启动 headless Chrome（' + theme + ' 主题）')
   const { child, cdp, userDataDir } = await launchChrome()
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width: viewportWidth, height: 1050, deviceScaleFactor: 2, mobile: false })
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: viewportWidth, height: viewportHeight, deviceScaleFactor: 2, mobile: false })
   let failed = 0
   try {
     for (const name of wanted) {

@@ -1891,19 +1891,48 @@
   backdrop-filter: blur(3px);
   animation: ttFadeIn .16s var(--tt-ease);
 }
+/*
+ * 卡片本身**不再是滚动容器**（0.31.0）：改成头 / 身 / 尾三段，只有 `.tt_sshBody` 滚。
+ * 此前 `overflow-y: auto` 写在卡片上，标题与底部动作行会跟着内容一起滚走——实测
+ * 1680×1050 下打开连接对话框，底部那颗「连接」初始根本不在视口里。
+ * 三段的内边距 / 间距沿用改版前的值（20px 外边距、11px 行距），只有滚动归属变了。
+ */
 .tt_sshCard {
   display: flex;
   flex-direction: column;
-  gap: 11px;
   width: min(460px, 92vw);
   max-height: 86vh;
-  padding: 20px;
-  overflow-y: auto;
+  padding: 0;
+  overflow: hidden;
   border: 0;
   border-radius: var(--tt-r-2xl);
   color: var(--tt-label);
   box-shadow: var(--dsw-elevation-prominent);
   animation: ttModalIn .18s var(--tt-ease);
+}
+.tt_sshHead {
+  flex: none;
+  /* 底部留一档行距：中段滚动时内容在离标题 11px 处被裁，不会贴着标题 */
+  padding: 20px 20px 11px;
+}
+/* 唯一的滚动区：`min-height: 0` 是 flex 子项能被压缩的前提（否则内容会把卡片顶出 max-height） */
+.tt_sshBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 0 20px 11px;
+  overflow-y: auto;
+  /* 滚到底不要把滚动链传给外层（面板/宿主页面），否则对话框里滚一下整页跟着动 */
+  overscroll-behavior: contain;
+}
+.tt_sshFoot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 0 20px 20px;
 }
 .tt_sshTitle {
   display: flex;
@@ -1935,10 +1964,10 @@
  * （`.tt_routeList` / `.tt_shellList`，`position: fixed` + placePopover，见下），那边由 JS 逐次
  * 定位、天然逃出卡片的 overflow，与这里的 absolute 版各管一处，别一起改。
  *
- * 已知边界：卡片是 `overflow-y: auto`，浮层如果贴到卡片下缘会被裁。当前两个选择器
- * （私钥口令 / 密码）都在对话框中段，180px 放得下；真遇到贴底的位置，再改成 `position: fixed`
- * + `getBoundingClientRect()` 定位——那反而天然逃出卡片的 overflow（backdrop 有
- * `backdrop-filter`，fixed 会以它为包含块）。
+ * 已知边界：滚动区是 `.tt_sshBody`（0.31.0 起卡片本身不再滚），浮层如果贴到它的下缘会被裁。
+ * 当前两个选择器（私钥口令 / 密码）都在对话框中段，180px 放得下；真遇到贴底的位置，再改成
+ * `position: fixed` + `getBoundingClientRect()` 定位——那反而天然逃出滚动区的 overflow
+ * （backdrop 有 `backdrop-filter`，fixed 会以它为包含块）。
  */
 .tt_sshRow > .tt_envList {
   position: absolute;
@@ -2003,6 +2032,77 @@
   display: grid;
   grid-template-columns: 1fr 112px;
   gap: 11px;
+}
+/*
+ * 「高级」折叠区（0.31.0）：跳板机 / 代理命令 / 主机密钥别名三段在条目里没配过时默认收起，
+ * 把常用字段（主机 / 用户名 / 认证 / 保存）留在首屏。
+ *
+ * 它是**披露控件**（chevron + 标题 + 元信息），不是按钮族的变体——所以类名不带 `btn` 标记，
+ * 免得被检查十二当成 `.tt_toolBtn` 的并列变体去比尺寸；几何按宿主的「字段标签」角色取
+ * （12px / 18px / 500），点击目标高度与同栏输入框对齐。
+ */
+.tt_sshAdvToggle {
+  display: flex;
+  align-items: center;
+  gap: var(--tt-gap-sm);
+  width: 100%;
+  height: var(--tt-h-lg);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: 0 0;
+  color: var(--tt-label-2);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.tt_sshAdvToggle:hover {
+  color: var(--tt-label);
+}
+.tt_sshAdvToggle:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  border-radius: var(--tt-r-xs);
+}
+/*
+ * 展开图标：16px 图标盒里放 14px 的尖括号，与宿主 disclosure 的 leading 同款
+ * （`DisclosureRow.module.css`：盒子 `16px`、`svg { width/height: 14px }`）。
+ * 形状是**宿主的**那一对描边尖括号（收起右 / 展开下，见 index.js 的 ICON_CHEVRON_*），
+ * 所以这里不写 transform 旋转——直接换图标，与官方 provider 卡片的行为一致。
+ */
+.tt_sshAdvChevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--tt-label-3);
+}
+.tt_sshAdvText {
+  flex: none;
+}
+/* 「里面配了什么 / 这一段是干什么的」：右对齐灰字，长了一行省略 */
+.tt_sshAdvMeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--tt-label-3);
+  font-weight: 400;
+  text-align: right;
+}
+.tt_sshAdvBody {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+/* 用 hidden 属性控显隐时，别被上面的 display: flex 盖掉 */
+.tt_sshAdvBody[hidden] {
+  display: none;
 }
 .tt_sshActions {
   display: flex;

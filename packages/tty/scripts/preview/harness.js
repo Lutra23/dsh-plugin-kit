@@ -209,6 +209,63 @@
     await sleep(200)
     return item
   }
+  /**
+   * SSH 连接对话框「头尾固定」的公共断言（0.31.0）：
+   * 标题钉在卡片上缘、底部动作行钉在下缘，**只有中段滚**——此前是整张卡片
+   * `overflow-y: auto`，滚一下就两头都不见了（底部按钮初始根本不在视口里）。
+   * 内容溢出时把中段滚到底再复查一次，否则「没滚动」等于这条断言没验到。
+   */
+  const sshFrameProblem = () => {
+    const card = q('.tt_sshCard')
+    const head = q('.tt_sshHead')
+    const body = q('.tt_sshBody')
+    const foot = q('.tt_sshFoot')
+    if (card === null || head === null || body === null || foot === null) return '连接对话框缺少头 / 身 / 尾三段'
+    if (getComputedStyle(card).overflowY !== 'hidden') return '卡片自己还在滚动（标题与按钮会跟着跑）'
+    if (getComputedStyle(body).overflowY !== 'auto') return '中段不是滚动容器'
+    const cardRect = card.getBoundingClientRect()
+    if (Math.abs(head.getBoundingClientRect().top - cardRect.top) > 1) return '标题没钉在卡片上缘'
+    if (Math.abs(foot.getBoundingClientRect().bottom - cardRect.bottom) > 1) return '底部动作行没钉在卡片下缘'
+    if (body.scrollHeight > body.clientHeight) {
+      body.scrollTop = body.scrollHeight
+      const after = card.getBoundingClientRect()
+      if (Math.abs(head.getBoundingClientRect().top - after.top) > 1) return '把中段滚到底后标题跟着跑了'
+      if (Math.abs(foot.getBoundingClientRect().bottom - after.bottom) > 1) return '把中段滚到底后底部动作行跟着跑了'
+      if (body.scrollTop === 0) return '中段内容溢出却滚不动'
+    }
+    return null
+  }
+  /**
+   * 「高级」折叠区的展开图标：收起 = 右尖括号、展开 = 下尖括号，**路径逐字取自宿主**
+   * `dsh-client-ui-primitives` 的 `IconChevronRightOutlineRegular` / `IconChevronDownOutlineRegular`
+   * （官方 provider 卡片「自定义设置」就是这一对；用户原话「展开图标和 dsh 官方的图标保持一致」）。
+   * 夹具里比一次实时的 DOM，源码那一半在 `test/ssh-dialog-shell.test.ts` 钉着。
+   */
+  const HOST_CHEVRON_RIGHT = 'M6 12L9.29289 8.70711C9.68342 8.31658 9.68342 7.68342 9.29289 7.29289L6 4'
+  const HOST_CHEVRON_DOWN = 'M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6'
+  /** 折叠区钉在图标上的判据：返回 null 表示与宿主一致，否则给出实测路径。 */
+  const advChevronProblem = (expected) => {
+    const path = q('.tt_sshAdvChevron path')
+    if (path === null) return '「高级」折叠区的展开图标缺失'
+    const d = path.getAttribute('d') ?? ''
+    if (d !== expected) return '展开图标与宿主的不是同一只（实测 d="' + d + '"）'
+    return null
+  }
+  /** 从「+」菜单里按条目名点开编辑（对话框只认连接簿里已存在的名字）。 */
+  const openEditFor = async (name) => {
+    await clickAdd()
+    const rows = await waitFor(() => {
+      const r = qa('.tt_addMenuRow')
+      return r.length > 0 ? r : null
+    })
+    const row = rows.find((r) => (r.querySelector('.tt_addMenuMain')?.textContent ?? '') === name)
+    if (row === undefined) throw new Error('「+」菜单里找不到条目 ' + name)
+    const editBtn = [...row.querySelectorAll('.tt_addMenuEdit')].find((b) => attributeSays(b, 'title', '编辑连接', 'Edit connection'))
+    if (editBtn === undefined) throw new Error('条目 ' + name + ' 没有「编辑连接」按钮')
+    editBtn.click()
+    await waitFor(() => q('.tt_sshCard'))
+    await sleep(200)
+  }
   /** SFTP 落点断言：卡片在挂载位里（docked）还是退回了居中对话框（modal）。 */
   const sftpSurfaceAssert = () => ({
     docked: q('.tt_dockPaneBody > .tt_sftpCard') !== null || q('.tt_dockPaneBody > .tt_sftpDualCard') !== null,
@@ -425,18 +482,94 @@
       await waitFor(() => resultEl() && resultEl().textContent !== '' && !says(resultEl(), '测试中', 'Testing'))
       await sleep(250)
     },
+    /* SSH 连接对话框：「保存到连接簿」名称行常显 + 填名字自动勾上（0.31.0） */
+    async 'ssh-save-book'() {
+      await openPanel()
+      await clickAdd()
+      await clickMenuItem('SSH 连接…', 'SSH connection…')
+      await waitFor(() => q('.tt_sshCard'))
+      /*
+       * 用户原话「这个默认展开吧」（贴的是「保存到连接簿 + 连接簿名称」那一块）。这里按**文案**
+       * 找那两个控件，再把四条联动规则逐条敲一遍——它们错掉时界面都看不出来（最典型：取消勾选后
+       * 名字还留在框里 ⇒ 按下去既不保存也没提示）。
+       */
+      window.__previewAssert = async () => {
+        const labelFor = (...names) => qa('.tt_sshCard .tt_cardLabel').find((el) => says(el, ...names))
+        const saveLabel = labelFor('保存到连接簿', 'Save to the host book')
+        const nameLabel = labelFor('连接簿名称', 'Book name')
+        if (saveLabel === undefined || nameLabel === undefined) return '找不到「保存到连接簿 / 连接簿名称」这两个控件'
+        const saveCheck = saveLabel.closest('.tt_cardRow')?.querySelector('input[type="checkbox"]')
+        const nameRow = nameLabel.closest('.tt_sshRow')
+        const nameInput = nameRow?.querySelector('input')
+        if (saveCheck === undefined || saveCheck === null || nameRow === null || nameInput === null) {
+          return '「保存到连接簿」那一组的结构不对'
+        }
+        const hostInput = qa('.tt_sshCard input')[0]
+        // ① 默认：名称行就在眼前（不必先勾勾选框），且勾选框是关的
+        if (nameRow.getBoundingClientRect().height <= 0) return '连接簿名称这一行默认不显示（用户要的是「默认展开」）'
+        if (saveCheck.checked !== false) return '默认就把「保存到连接簿」勾上了（那一项应当是关的）'
+        // ② 填了名字 → 自动勾上
+        nameInput.value = 'staging-db'
+        nameInput.dispatchEvent(new Event('input'))
+        if (saveCheck.checked !== true) return '名称框里填了名字，「保存到连接簿」却没自动勾上'
+        // ③ 清空名字 → 自动取消
+        nameInput.value = ''
+        nameInput.dispatchEvent(new Event('input'))
+        if (saveCheck.checked !== false) return '名字清空了，「保存到连接簿」还勾着（等于静默保存一条无名条目）'
+        // ④ 手动勾上且名称为空 → 用主机名兜底
+        hostInput.value = 'db.internal'
+        saveCheck.checked = true
+        saveCheck.dispatchEvent(new Event('change'))
+        if (nameInput.value !== 'db.internal') return '手动勾上时没有用主机名兜底（实测 "' + nameInput.value + '"）'
+        // ⑤ 手动取消 → 名字一起清掉（不留「名字还在、但不会保存」的悬空态）
+        saveCheck.checked = false
+        saveCheck.dispatchEvent(new Event('change'))
+        if (nameInput.value !== '') return '取消勾选后名字还留在框里（实测 "' + nameInput.value + '"）'
+        // 截图落在「填了名字、勾选框自动跟上」这个态上
+        nameInput.value = 'staging-db'
+        nameInput.dispatchEvent(new Event('input'))
+        return null
+      }
+    },
     /* SSH 连接对话框（编辑连接簿条目，含 env 选择器） */
     async 'ssh-edit'() {
       await openPanel()
+      await openEditFor('staging-db')
+      window.__previewAssert = async () => {
+        const advBody = q('.tt_sshAdvBody')
+        const advToggle = q('.tt_sshAdvToggle')
+        if (advBody === null || advToggle === null) return '「高级」折叠区缺失'
+        // 这条条目一项「高级」都没配：必须默认收起，否则这轮优化等于没做
+        if (advBody.hidden !== true) return '条目里没配过高级项，折叠区却是展开的'
+        if (advToggle.getAttribute('aria-expanded') !== 'false') return 'aria-expanded 与收起态不一致'
+        return advChevronProblem(HOST_CHEVRON_RIGHT) ?? sshFrameProblem()
+      }
+    },
+    /* SSH 连接对话框：展开「高级」并检验头尾固定（中段溢出时滚到底再复查） */
+    async 'ssh-adv'() {
+      await openPanel()
       await clickAdd()
-      const rows = await waitFor(() => {
-        const r = qa('.tt_addMenuRow')
-        return r.length > 0 ? r : null
-      })
-      const editBtn = [...rows[1].querySelectorAll('.tt_addMenuEdit')].find((b) => attributeSays(b, 'title', '编辑连接', 'Edit connection'))
-      editBtn.click()
+      await clickMenuItem('SSH 连接…', 'SSH connection…')
       await waitFor(() => q('.tt_sshCard'))
-      await sleep(200)
+      const advBody = await waitFor(() => q('.tt_sshAdvBody'))
+      if (advBody.hidden !== true) throw new Error('新建连接时「高级」应当默认收起')
+      q('.tt_sshAdvToggle').click()
+      await sleep(150)
+      if (advBody.hidden === true) throw new Error('点「高级」没有展开')
+      window.__previewAssert = async () => advChevronProblem(HOST_CHEVRON_DOWN) ?? sshFrameProblem()
+    },
+    /* SSH 连接对话框：编辑一条**配过高级项**的条目 → 折叠区自动展开并点名已配置的项 */
+    async 'ssh-jump'() {
+      await openPanel()
+      await openEditFor('bastion-jump')
+      window.__previewAssert = async () => {
+        const advBody = q('.tt_sshAdvBody')
+        const meta = q('.tt_sshAdvMeta')
+        if (advBody === null) return '「高级」折叠区缺失'
+        if (advBody.hidden === true) return '条目里配了跳板机 / 代理命令，折叠区却默认收起（配置被藏起来了）'
+        if (meta === null || !says(meta, '跳板机', 'Jump host')) return '折叠区元信息没点名已配置的跳板机'
+        return advChevronProblem(HOST_CHEVRON_DOWN) ?? sshFrameProblem()
+      }
     },
     /* 设置卡片（展开） */
     async settings() {
