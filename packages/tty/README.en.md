@@ -136,11 +136,16 @@ Both were reproduced on **Windows 11 ARM (24H2) + Node 22 ARM64**. The fix:
   no new prompt, looking like “it was sent but never ran”). For **local sessions on win32** the plugin now
   turns a bare LF into CRLF (an existing CRLF is not doubled; non-Windows and SSH sessions pass through
   untouched), so the documented `\n` path just works;
-- **Three things are not supported** (the host turns them off and the settings card explains why):
-  - **Shell integration (OSC 133/7)**: injection relies on POSIX rc stubs plus the `-c` wrapper, neither of
-    which exists for cmd / PowerShell, so it is permanently off — **local** tabs therefore lose cwd tracking
-    (`tty_list.cwd` following `cd`), `tty_capture{last}` and command-granular `tty_expect` (remote Linux /
-    macOS hosts are unaffected);
+- **Shell integration (OSC 133/7) depends on the shell family**: the **PowerShell family is supported**
+  (`powershell.exe` / `pwsh.exe`) through a stable `-File` stub that hooks `prompt` and
+  `PSConsoleHostReadLine` — this yields cwd tracking (`tty_list.cwd` following `cd`), exit codes, the
+  `running` state and command-granular `tty_expect`. **cmd is not** (it has no command-boundary hooks), so
+  the settings card greys the switch out and points at “switch the shell path to PowerShell”. **Known
+  limit**: on PowerShell 7 the command output reaches ConPTY *after* the D marker (pane redraws are
+  asynchronous and batched — the same root cause as in the tmux case), so `tty_capture{last}` may come back
+  empty; use `tty_capture` to read the tail there. Windows PowerShell 5.1 is unaffected (both were measured
+  on a real machine);
+- **Two things are not supported** (the host turns them off and the settings card explains why):
   - **tmux persistence**: there is no tmux on Windows, so local tabs open normally but are not managed
     (SSH into a Linux host still works);
   - **Server status bar**: locally only CPU / memory / uptime are available (`node:os`); disk / TCP / network
@@ -257,7 +262,9 @@ This is why “`tty_open` a command that finishes and read the result afterwards
 
 ### Shell integration (OSC 133/7, 0.4.0)
 
-At spawn time hooks are injected through the existing `-c` wrapper layer according to the shell type (transparent to the user, no rc changes):
+On POSIX, hooks are injected through the existing `-c` wrapper layer according to the shell type; on
+Windows the PowerShell family gets a stable `-File` stub instead (see the Windows section above). Both are
+transparent to the user and change no rc:
 
 - **zsh**: `ZDOTDIR` points at a temporary stub directory (the same approach VS Code uses); the stub sources
   the user’s original rc first and then appends `precmd`/`preexec` hooks;
@@ -845,7 +852,7 @@ sub-page under the Plugins sidebar, and `≤0.1.5` uses the settings-page card.
 | `reconnectGraceSec` | 120 | Seconds a session is kept alive after an abnormal disconnect (0~3600): the session survives a page refresh/network blip waiting for a reconnect, and the reaper ends it on timeout; `0` = the old behavior, end immediately on disconnect |
 | `sshHosts` | `[]` | SSH connection book (selectable in the panel “+” menu): entries `{name, host, port=22, username, auth=agent\|key\|password, keyPath, passphrase, password, agentForward, hostKeyAlias='', persist=false}`; saved as a whole-set replacement, the same name overwrites; `password` / `passphrase` support `env:VAR` references so no plaintext is stored; with persistence on, clicking an entry opens a tmux persistent session by default, and `persist=false` is an **opt-out**; an empty `hostKeyAlias` locates fingerprints by host address (TOFU), while a non-empty one locates them by alias (several addresses of one host share a record — see “SSH connections”) |
 | `hostKeys` | `[]` | SSH host key records (TOFU, maintained automatically): entries `{host, port, fingerprints[]}` (the legacy single `fingerprint` field is migrated and merged on read); unique by host:port, one record holds all of a host’s keys, appended automatically on the first connection, any matching fingerprint is allowed, and a full mismatch rejects the connection; the settings card can delete them to reset |
-| `shellIntegration` | true | Injects the OSC 133/7 shell integration (command boundary markers + cwd reporting; `tty_capture{last}` depends on it); zsh/bash supported, other shells skipped automatically; can be turned off when compatibility problems appear |
+| `shellIntegration` | true | Injects the OSC 133/7 shell integration (command boundary markers + cwd reporting; `tty_capture{last}` depends on it); zsh/bash on POSIX and the PowerShell family on Windows (`-File` stub), other shells (including Windows cmd) skipped automatically; can be turned off when compatibility problems appear |
 | `tunnels` | `[]` | Port-forwarding tunnels: entries `{name, bookName, direction=local\|remote, localPort?, remoteHost?, remotePort?, localTargetHost?, localTargetPort?, enabled}`; `bookName` references a connection-book entry for host and authentication; maintained graphically in the “Port forwarding” block of the card |
 | `sftpStyle` | `dialog` | SFTP File Browser UI style: `dialog` single pane (remote directory + upload/download/drag & drop) / `dual` two panes (local left / remote right, inline `⇨/⇦` server-side direct transfer); reopen SFTP for it to take effect |
 | `persistence` | `off` | Session persistence: `off` sessions live and die with the host (default); `tmux` makes **every newly opened tab hosted by the tmux server by default**, recoverable across a host restart (requires tmux locally/remotely); the SSH dialog can opt out for a single connection |
@@ -1198,8 +1205,10 @@ verify things like “is there still a white panel after switching light/dark th
   only for `reconnectGraceSec` (120s by default), and a host process restart ends all sessions; sessions not
   reconnected before the deadline are ended by the reaper, and scroll history beyond the output buffer
   (last 256KB) cannot be recovered.
-- **Shell integration is zsh / bash only**: other shells are skipped automatically (`tty_capture{last}`
-  reports a clear error rather than a wrong one). bash < 4.4 uses the DEBUG trap fallback: internal commands
+- **Shell integration covers zsh / bash on POSIX and the PowerShell family on Windows**: other shells
+  (Windows cmd) are skipped automatically (`tty_capture{last}` reports a clear error rather than a wrong
+  one); on PowerShell 7 the command output can land after the D marker, so `tty_capture{last}` may be empty
+  there (read the tail with `tty_capture` instead). bash < 4.4 uses the DEBUG trap fallback: internal commands
   of compound commands such as loops emit extra B markers, and `tty_capture{last}` captures only the output
   after the last internal command for those commands (exit codes and `tty_expect` are unaffected). If the
   user’s rc overrides `PROMPT_COMMAND`/the hook array, the integration may stop working — turn off

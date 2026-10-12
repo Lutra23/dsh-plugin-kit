@@ -124,10 +124,13 @@ dsh plugin --profile web add link:$(pwd)/packages/tty   # 仓库开发调试
   下移一格、**不提交命令行**——`tty_send` 按工具描述发 `echo X\n` 时命令停在输入行上（没有输出、
   没有新提示符，看起来像「发出去了但没执行」）。**win32 的本地会话**上插件现在把裸 LF 补成 CRLF
   （已经是 CRLF 的不重复补；非 Windows 与 SSH 会话原样透传），所以照描述写 `\n` 这条主路径直接可用；
-- **不支持的三项（宿主侧自动关掉，设置卡片里写明原因）**：
-  - **shell 集成（OSC 133/7）**：注入靠 POSIX rc 桩 + `-c` 包装层，cmd / PowerShell 上都不成立，
-    因此恒关 —— **本地标签**的 `tty_list.cwd` 跟随 `cd`、`tty_capture{last}` 与 `tty_expect`
-    的命令粒度不可用（远程 Linux / macOS 主机照旧支持）；
+- **shell 集成（OSC 133/7）按家族分**：**PowerShell 家族支持**（`powershell.exe` / `pwsh.exe`）——
+  注入走 `-File` 稳定桩（挂 `prompt` + `PSConsoleHostReadLine` 钩子），拿到 `tty_list.cwd` 跟随
+  `cd`、退出码、`running` 三态与命令粒度的 `tty_expect`；**cmd 不支持**（没有命令开始/结束钩子），
+  设置卡片把开关置灰并指向「把 Shell 路径换成 PowerShell」。**已知限制**：PowerShell 7 上命令输出
+  在 ConPTY 里晚于 D 标记抵达（渲染重画是异步批量的，与 tmux 场景同根因），`tty_capture{last}`
+  可能取到空 —— 那里用 `tty_capture` 读尾部；Windows PowerShell 5.1 不受影响（两版都真机实测过）；
+- **不支持的两项（宿主侧自动关掉，设置卡片里写明原因）**：
   - **tmux 持久化**：Windows 上没有 tmux，本地标签照常打开但不受托管（SSH 到 Linux 主机仍可用）；
   - **服务器状态条**：本地只拿得到 CPU / 内存 / 在线时长（`node:os`），磁盘 / TCP / 网速 / 温度
     显示「无」（**远端** Windows 主机走 PowerShell 那一跳，见「服务器状态条」一节）；
@@ -228,7 +231,8 @@ dsh plugin --profile web add link:$(pwd)/packages/tty   # 仓库开发调试
 
 ### shell 集成（OSC 133/7，0.4.0）
 
-spawn 时经既有的 `-c` 包装层按 shell 类型注入钩子（对用户透明，不改 rc）：
+POSIX 上经既有的 `-c` 包装层按 shell 类型注入钩子，Windows 上走 PowerShell 的 `-File` 稳定桩
+（都对用户透明，不改 rc）：
 
 - **zsh**：`ZDOTDIR` 指向临时桩目录（VS Code 同款方案），桩文件先 source
   用户原 rc 再追加 `precmd`/`preexec` 钩子；
@@ -240,10 +244,18 @@ spawn 时经既有的 `-c` 包装层按 shell 类型注入钩子（对用户透�
   副作用：循环体等复合命令的内部命令会多发 B 标记，仅影响
   `tty_capture{last}` 对这类命令的截取起点，D/退出码与 `tty_expect` 不受影响；
   PROMPT_COMMAND 挂钩兼容字符串与数组（bash 5.1+）两种形态；
+- **PowerShell（Windows）**：`-File` 稳定桩（`<DSH_HOME|~/.dsh>/tty[/<profile>]/shell/powershell/bootstrap.ps1`，
+  纯 ASCII —— Windows PowerShell 5.1 按当前 ANSI 代码页读无 BOM 的 .ps1，一个非 ASCII 字节就炸解析），
+  包装 `prompt` 与 `PSConsoleHostReadLine`；用户 profile 照常生效（桩在 profile **之后**载入，拿到的就是
+  用户自己那个 prompt，包装后原样调用）。退出码口径：B 时刻快照 `$LASTEXITCODE`、D 时刻**变了**才报它
+  （原生命令），否则按 `$?` 报 0/1（cmdlet）——刻意**不清空** `$LASTEXITCODE`，免得用户紧接着的
+  `echo $LASTEXITCODE` 读到空值；代价是连续两次同码的非零原生命令，第二次降级报 1。
+  拿不到原 `PSConsoleHostReadLine`（用户关了 PSReadLine）时**一个标记都不发**：只发 A/7 会让宿主
+  报「没在跑」，比「无法判断」更危险（D77）；
 - 标记语义：`133;A` prompt 开始 / `133;B` 命令开始 / `133;D;<exit>` 命令
   结束带退出码 / `OSC 7 file://…` cwd 上报（`tty_list.cwd` 跟随 `cd`，
   SSH 会话则上报远程路径）；
-- 其他 shell 静默关闭；配置 `shellIntegration: false` 可整体关掉（逃生门）。
+- 其他 shell（含 Windows 的 cmd）静默关闭；配置 `shellIntegration: false` 可整体关掉（逃生门）。
 
 **回溯匹配与已读水位线（D72）**：`tty_expect` 会先回看**还没被读过**的输出（命令瞬间跑完时
 要等的标记早就在缓冲区里了），回看的起点抬到「未读区内最后一个 `B` 标记之后」——回显落在 `A`

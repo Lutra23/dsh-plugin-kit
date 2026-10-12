@@ -17,7 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { sanitizeJumpSpec, sanitizeProxyCommand, spawnSsh, sshTarget, expandHome, setCredentialResolver, setProxyCommandPolicy, validateJumpSpec, validateProxyCommand } from './ssh.js';
 import { sharedGrantStore, auditLoadedGrants, attachTierGate, bindCapabilitySources, capabilityDeniedMessage, capabilityGrantAt, capabilityGrantVia, capabilityGranted, capabilityPaths, createElevationManager, } from '@hyzyn/dsh-kit';
 import { probeSsh } from './probe.js';
-import { buildCommandSpawn, buildShellSpawn, commandShellHint, defaultShellPath, tmuxSocketName } from './shell-integration.js';
+import { buildCommandSpawn, buildShellSpawn, commandShellHint, defaultShellPath, shellIntegrationSupported, tmuxSocketName } from './shell-integration.js';
 import { KEY_VOCABULARY, resolveKeys } from './keys.js';
 import { parseSshConfigDetailed } from './ssh-config.js';
 import { parseKnownHostsDetailed } from './known-hosts.js';
@@ -701,7 +701,18 @@ function osc7Path(body) {
         const url = new URL(body);
         if (url.protocol !== 'file:')
             return undefined;
-        const decoded = decodeURIComponent(url.pathname);
+        let decoded = decodeURIComponent(url.pathname);
+        /*
+         * Windows 盘符：PowerShell 桩用 `[Uri]::AbsoluteUri` 上报，`D:\DSH\x` 于是变成
+         * `file:///D:/DSH/x`、`URL.pathname` 是 `/D:/DSH/x` —— 去掉盘符前那根多余的斜杠才是
+         * 可用的 Windows 路径（`/D:/x` 形态拿去 spawn 会被当成相对盘根的路径）。
+         *
+         * UNC（`\\server\share` → `file://server/share`）的服务器段住在 host 里，而本函数按
+         * 既有语义（POSIX shell 上报的 host 是本机名）忽略 host，所以 UNC cwd 只显示成
+         * `/share/…`：纯展示降级，不参与任何 spawn 决策。
+         */
+        if (process.platform === 'win32' && /^\/[A-Za-z]:[\\/]/.test(decoded))
+            decoded = decoded.slice(1);
         return decoded !== '' ? decoded : undefined;
     }
     catch {
@@ -3727,20 +3738,21 @@ const plugin = definePlugin({
         const config = plainConfig((rawConfig ?? {}));
         if (config?.enabled === false)
             return;
+        // 默认 shell 按平台取（Windows 没有 $SHELL，回落 /bin/zsh 会让本地终端一条都开不起来；
+        // 见 defaultShellPath）。用户显式填了「Shell 路径」就照用。
+        const configuredShell = config?.shell?.trim() || defaultShellPath();
         const live = new LiveConfig({
-            // 默认 shell 按平台取（Windows 没有 $SHELL，回落 /bin/zsh 会让本地终端一条都开不起来；
-            // 见 defaultShellPath）。用户显式填了「Shell 路径」就照用。
-            shell: config?.shell?.trim() || defaultShellPath(),
+            shell: configuredShell,
             term: config?.term?.trim() || 'xterm-256color',
             colorTerm: config?.colorTerm?.trim() || 'truecolor',
             cwd: config?.cwd?.trim() || process.cwd(),
             reconnectGraceSec: typeof config?.reconnectGraceSec === 'number' && Number.isInteger(config.reconnectGraceSec) && config.reconnectGraceSec >= 0 ? config.reconnectGraceSec : DEFAULT_RECONNECT_GRACE_SEC,
             sshHosts: Array.isArray(config?.sshHosts) ? config.sshHosts : [],
             hostKeys: Array.isArray(config?.hostKeys) ? config.hostKeys : [],
-            // shell 集成（OSC 133/7）靠 POSIX rc 注入 + `-c` 包装层：Windows 上的 cmd / PowerShell
-            // 两者都不成立（实测 cmd 忽略 -c 空跑、PowerShell 报 export 不存在），所以恒关。
-            // 配置项照旧留着（快照里会显示 false），界面上也说明原因。
-            shellIntegration: process.platform !== 'win32' && config?.shellIntegration !== false,
+            // shell 集成（OSC 133/7）：POSIX 走 rc 注入 + `-c` 包装层，Windows 走 PowerShell 的
+            // `-File` 桩（见 buildWindowsShellSpawn）。Windows + cmd 仍是 false —— 没有命令开始/
+            // 结束钩子，硬开只会让界面摆一个不生效的开关。
+            shellIntegration: config?.shellIntegration !== false && shellIntegrationSupported(configuredShell),
             tunnels: Array.isArray(config?.tunnels) ? config.tunnels : [],
             persistence: config?.persistence === 'tmux' ? 'tmux' : 'off',
             endOnPageClose: config?.endOnPageClose === true,
@@ -3839,6 +3851,7 @@ const plugin = definePlugin({
             hostKeys: live.hostKeys,
             tunnels: live.tunnels,
             shellIntegration: live.shellIntegration,
+            shellIntegrationSupported: shellIntegrationSupported(live.shell),
             sftpStyle: stateRef.sftpStyle,
             persistence: live.persistence,
             endOnPageClose: live.endOnPageClose,
