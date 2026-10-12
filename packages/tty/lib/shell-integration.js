@@ -361,6 +361,12 @@ function ensureBashStubRc() {
  * `inCommand` 恒 false，`running` 就从「未知」退化成「没在跑」，正是 D77 警告的静默事故
  * （往正在跑的程序里塞命令）。
  *
+ * 已知副作用（未修；VS Code 的 shell integration 是同一个取舍）：包装里先抓 `$?`、写完 OSC
+ * 才调用户原 `prompt`，于是**用户原 prompt 读到的 `$?` 是那几次 `[Console]::Write` 的成败**
+ * （恒真），而不是上一条命令的 —— `function prompt { if ($?) {…} }` 那种「失败变红」会因此
+ * 失效。要修得先把失败态还原回去（例如按捕获到的状态补发一条错误记录），而那必须两版
+ * PowerShell 都真机验过才能落。
+ *
  * 已知限制（真机实测，见 README 的 Windows 一节）：PowerShell 7 上命令 stdout 在 ConPTY
  * 里晚于 D 标记抵达（渲染管线批量重画 vs 直通序列即时转发，与 tmux 场景同根因），于是
  * 宿主的 B..D 捕获窗口为空 —— cwd 跟随 / 退出码 / running 三态都正常，`capture{last}` 的
@@ -561,7 +567,13 @@ export function shellIntegrationSupported(shell, platform = process.platform) {
  *
  * `-ExecutionPolicy Bypass` 是**进程级**的：机器策略若为 Restricted / AllSigned，不加它连
  * 这个未签名的桩都载不进去（表现是集成静默失效）。它不改机器策略，也不放宽本插件的信任级
- * —— 终端面板本来就在以用户身份执行任意命令。
+ * —— 终端面板本来就在以用户身份执行任意命令。取值停在 Bypass（不改用更窄的 RemoteSigned：
+ * 收益只是策略窄一点，代价是载入路径要在真机上重验一遍）。两条边界如实记下：
+ *   1. **组策略优先**：`-ExecutionPolicy` 能压过注册表里的策略，但压不过**组策略**设置的
+ *      策略。GPO 锁成 Restricted / AllSigned 的机器上，桩照样载不进去 —— 标签开着、集成
+ *      没有（与「用户关了 PSReadLine」同一种静默降级，见 README 的 Windows 一节）；
+ *   2. **会外溢给子进程**：这个参数把值写进 `$Env:PSExecutionPolicyPreference`，从该会话里
+ *      再起 powershell / pwsh 会继承它。
  */
 function buildWindowsShellSpawn(shell, integration) {
     if (!isPowerShellShell(shell))

@@ -1108,7 +1108,8 @@ function advanceReadMark(session) {
  * 水位线之后的**未读**原始输出。下界再抬到「最后一个 B 标记之后」：回显落在
  * A（prompt 开始）与 B（命令开始）之间，所以这样能零启发式地排除回显——按
  * 文本比对「跳过与发送内容相同的行」会被折行 / ANSI / 多行粘贴打碎。
- * 没有 B 标记（未开 shell 集成 / Windows PowerShell / 远端未装集成）时无法按边界切片：
+ * 没有 B 标记（未开 shell 集成 / Windows 的 cmd / 远端未装集成 / 用户关了 PSReadLine）时
+ * 无法按边界切片：
  * D75 起改用「最近提交过的输入」这份回显候选把回显行从匹配窗口里剔掉（见 echoOnlyMatch），
  * 不再直接拿回显当命中。
  */
@@ -4991,7 +4992,7 @@ const plugin = definePlugin({
                         name: 'tty_list',
                         // 只读工具：与同轮其它工具并发执行（宿主默认把未声明的工具当独占，见项目级 ROADMAP 第 4 项）
                         isConcurrencySafe: () => true,
-                        description: '列出当前终端面板会话（sid / kind(local|ssh) / target / pid / cwd / 创建与最后活动时间），**含进程已退出但仍只读保留着的会话**（带 exited:true + 退出码/信号；按时间释放时另带 retainMs）。**running** 说明这个会话有没有命令在跑（true = 在跑，现在别往里发命令，那些字节会被正在跑的程序当输入吃掉；false = 命令已结束；**省略 = 无法判断**——该会话没有 shell 集成标记，例如非持久 SSH / fish·csh / Windows 本地 / 集成被关，**不是**「没在跑」）；同源的 lastExitCode / lastExitAt 是「上一条已完成命令」的退出码与结束时刻。用户开了终端面板后，用 tty_capture 读取某个 sid 的输出、用 tty_send 向该会话发送按键。已退出的会话只能读（写会报错），要接着操作请 tty_open 新开一条。',
+                        description: '列出当前终端面板会话（sid / kind(local|ssh) / target / pid / cwd / 创建与最后活动时间），**含进程已退出但仍只读保留着的会话**（带 exited:true + 退出码/信号；按时间释放时另带 retainMs）。**running** 说明这个会话有没有命令在跑（true = 在跑，现在别往里发命令，那些字节会被正在跑的程序当输入吃掉；false = 命令已结束；**省略 = 无法判断**——该会话没有 shell 集成标记，例如非持久 SSH / fish·csh / Windows 的 cmd / 集成被关，**不是**「没在跑」）；同源的 lastExitCode / lastExitAt 是「上一条已完成命令」的退出码与结束时刻。用户开了终端面板后，用 tty_capture 读取某个 sid 的输出、用 tty_send 向该会话发送按键。已退出的会话只能读（写会报错），要接着操作请 tty_open 新开一条。',
                         parameters: {},
                         output: {
                             schema: {

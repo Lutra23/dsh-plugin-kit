@@ -144,7 +144,13 @@ Both were reproduced on **Windows 11 ARM (24H2) + Node 22 ARM64**. The fix:
   limit**: on PowerShell 7 the command output reaches ConPTY *after* the D marker (pane redraws are
   asynchronous and batched — the same root cause as in the tmux case), so `tty_capture{last}` may come back
   empty; use `tty_capture` to read the tail there. Windows PowerShell 5.1 is unaffected (both were measured
-  on a real machine);
+  on a real machine). The stub only loads through `-ExecutionPolicy Bypass` (process-scoped); two boundaries
+  are recorded as they are: when **Group Policy** locks the execution policy to Restricted / AllSigned that
+  parameter does **not** override GPO, so the stub fails to load and the tab opens with integration silently
+  absent (the same degradation as “the user turned PSReadLine off”); the parameter also writes the value into
+  `$Env:PSExecutionPolicyPreference`, which PowerShell processes started from that session inherit. One more
+  known side effect: wrapping `prompt` makes **the user’s original prompt see its own `$?`** as the result of
+  our writes (always true), so failure indicators that rely on `$?` stop working;
 - **Two things are not supported** (the host turns them off and the settings card explains why):
   - **tmux persistence**: there is no tmux on Windows, so local tabs open normally but are not managed
     (SSH into a Linux host still works);
@@ -170,7 +176,7 @@ The plugin injects nineteen tools into the agent (operations show up live in the
 
 | Tool | Purpose |
 | --- | --- |
-| `tty_list` | List terminal sessions (sid / kind (`local\|ssh`) / target / pid / **cwd tracked live as you `cd`** / activity time; tmux persistent sessions carry a `persist` marker; sessions the agent opened carry `owner: 'agent'`). **Includes sessions whose process has exited but which are still inside their read-only retention window** (`exited:true` + exit code/signal, see below). **`running` says whether a command is currently executing** (true = it is: do not send into it now; false = the command has finished; **omitted = cannot tell** — non-persistent SSH / fish·csh / Windows local sessions carry no shell-integration markers, which is *not* the same as “idle”), and the same-source `lastExitCode` / `lastExitAt` are the exit code and end time of “the previous completed command” (0.23.0). The rendered text spells the three states `[空闲]` / `[运行中——现在别往里发命令]` / `[命令状态未知——…]`; **“unknown” also covers one more case** — the host has seen **no marker for that session since this boot** (typically a tmux persistent session already sitting at its prompt before the host restarted): send it a bare Enter or run a command and the marker arrives, turning it into `[空闲]`; non-persistent SSH / fish·csh / Windows local sessions never emit markers, so `[命令状态未知]` is their normal state |
+| `tty_list` | List terminal sessions (sid / kind (`local\|ssh`) / target / pid / **cwd tracked live as you `cd`** / activity time; tmux persistent sessions carry a `persist` marker; sessions the agent opened carry `owner: 'agent'`). **Includes sessions whose process has exited but which are still inside their read-only retention window** (`exited:true` + exit code/signal, see below). **`running` says whether a command is currently executing** (true = it is: do not send into it now; false = the command has finished; **omitted = cannot tell** — non-persistent SSH / fish·csh / Windows cmd sessions carry no shell-integration markers, which is *not* the same as “idle”), and the same-source `lastExitCode` / `lastExitAt` are the exit code and end time of “the previous completed command” (0.23.0). The rendered text spells the three states `[空闲]` / `[运行中——现在别往里发命令]` / `[命令状态未知——…]`; **“unknown” also covers one more case** — the host has seen **no marker for that session since this boot** (typically a tmux persistent session already sitting at its prompt before the host restarted): send it a bare Enter or run a command and the marker arrives, turning it into `[空闲]`; non-persistent SSH / fish·csh / Windows cmd sessions never emit markers, so `[命令状态未知]` is their normal state |
 | `tty_open` | **Open a terminal session yourself** (0.20.0): a local shell, or a command via `command` (dev server / watch; it runs as **a whole piece of code in the host shell’s syntax** — on a POSIX shell `cd x && cmd`, `a; b` and multi-line scripts work, while **Windows cmd / PowerShell use their own syntax**; the current shell and syntax are restated every turn in the systemPrompt terminal line; it is *not* subject to the “single line ≤2000” client rule below — D78), with optional tmux persistence via `persistName`. The session **shows up in the user’s terminal panel** as an ordinary tab the user can see and take over — never a hidden session |
 | `tty_close` | Close a session opened by `tty_open` (0.20.0). **Only the agent’s own sessions may be closed**: a tab the user opened is refused, so the agent never ends a terminal the user is working in. It also works on an **exited session that is still in read-only retention** — that is its release entry point (by default it is retained **until explicitly closed**, never on a timer) |
 | `tty_run` | **One-shot command** (0.23.0): open a session, run `command`, wait for it to finish and return the tail output + exit code directly — collapsing “`tty_open` → wait → `tty_capture{last}` → `tty_close`” into a single call. It **closes the session once the command finishes** by default (the result is already in this call); `keep:true` leaves it in read-only retention instead. If it is still running at `timeoutSec` (1~600, default 120) it returns `running:true` and **does not kill the session** (whether to keep waiting or close it is the caller’s call). When to use this instead of the bash tool: when the user should **see** the command, or when it must run inside a terminal session; for purely non-interactive commands bash is more direct |
@@ -286,8 +292,9 @@ buffer). The look-back lower bound is raised to “just after the last `B` marke
 the echo sits between `A` and `B`, so text in the echo never counts as a hit (deliberately no text
 comparison here: line wrapping / ANSI / multi-line paste would break it).
 
-- **Environments without `B` markers** (integration off / local Windows tabs / a remote host without the
-  hooks) have no boundary to cut at, so since D75 the echo is excluded by a different test: the command
+- **Environments without `B` markers** (integration off / local Windows cmd tabs / a remote host without
+  the hooks / PSReadLine turned off by the user) have no boundary to cut at, so since D75 the echo is
+  excluded by a different test: the command
   lines that the most recent `tty_send` submitted are stripped out of the candidate text and the pattern
   is retried — only “no longer matches after stripping” counts as a pure echo. That removes the false
   positive where the command never ran yet the wait reported `matched:true`, while the same text really

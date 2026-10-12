@@ -454,7 +454,7 @@ const I18N_ZH = {
   'check.announce': '向 agent 公告终端面板能力',
   'check.shellIntegration': 'shell 集成（OSC 133/7 注入）',
   'check.shellIntegrationWindows': 'shell 集成（OSC 133/7 注入：cwd 跟随、退出码、tty_expect 与「有没有命令在跑」）',
-  'hint.shellIntegrationWindows': 'cmd 没有命令开始/结束钩子，无法注入：把「Shell 路径」换成 powershell.exe 或 pwsh.exe（下拉候选里有）即可开启。远程 Linux / macOS 主机照旧支持。',
+  'hint.shellIntegrationWindows': 'cmd 没有命令开始/结束钩子，无法注入：把「Shell 路径」换成 powershell.exe 或 pwsh.exe（下拉候选里有），再确认这个开关是勾上的（此前的 Windows 装机上它可能已被存成关）。远程 Linux / macOS 主机照旧支持。',
   'hint.shellIntegrationPowerShell': 'PowerShell 家族由 `-File` 桩注入：cwd 跟随、退出码、tty_expect 与「有没有命令在跑」都可用。已知限制：PowerShell 7 上命令输出在 ConPTY 里晚于 D 标记抵达，`tty_capture{last}` 可能取到空——那里请用 `tty_capture` 读尾部（Windows PowerShell 5.1 不受影响）。',
   'section.sftp': 'SFTP 文件传输',
   'field.sftpStyle': 'SFTP 文件浏览风格',
@@ -904,7 +904,7 @@ const I18N_EN = {
   'check.announce': 'Announce the terminal panel capabilities to the agent',
   'check.shellIntegration': 'Shell integration (OSC 133/7 injection)',
   'check.shellIntegrationWindows': 'Shell integration (OSC 133/7 injection: cwd following, exit codes, tty_expect and the running state)',
-  'hint.shellIntegrationWindows': 'cmd has no command-boundary hooks, so nothing can be injected: switch “Shell path” to powershell.exe or pwsh.exe (both are in the candidate list) to enable it. Remote Linux / macOS hosts are unaffected.',
+  'hint.shellIntegrationWindows': 'cmd has no command-boundary hooks, so nothing can be injected: switch “Shell path” to powershell.exe or pwsh.exe (both are in the candidate list) and then make sure this switch is on (an earlier Windows install may have stored it as off). Remote Linux / macOS hosts are unaffected.',
   'hint.shellIntegrationPowerShell': 'The PowerShell family is instrumented through a `-File` stub: cwd following, exit codes, tty_expect and the running state all work. Known limit: on PowerShell 7 the command output reaches ConPTY after the D mark, so `tty_capture{last}` may come back empty — use `tty_capture` to read the tail there (Windows PowerShell 5.1 is unaffected).',
   'section.sftp': 'SFTP file transfer',
   'field.sftpStyle': 'SFTP file browser style',
@@ -9069,14 +9069,20 @@ function TtySettingsCard(props) {
    * `save()` 与脏检查共用这一份，避免两处各拼一遍「要提交哪些键」（那正是漂的种子）。
    */
   /*
-   * 快照里**不是配置项**的键（宿主会以「未知配置项」拒绝）：派生的授权状态与宿主平台。
+   * 快照里**不是配置项**的键（宿主会以「未知配置项」拒绝）：派生的授权状态、宿主平台、shell
+   * 集成的可注入性。
    *
    * D91 起这张表是**否定清单**，其余键**默认提交**。原先写的是肯定清单（一个一个列要提交的
    * 键），代价就是**新增 volatile 字段必须记得回来补**——`assistEnabled` 正是这么漏的：宿主
    * 侧压根没收到它，卡片上「保存后又弹回去」。否定清单漏一个的后果是宿主**响亮地**报
    * 「未知配置项: X」，而不是静默丢掉一个字段。
+   *
+   * 但「响亮」只在**有人点保存**时才响亮：单测与 CI 都不拿整份快照回提交，所以漏登记的派生
+   * 字段会让卡片**每一次保存**都 400 而闸门全绿（`shellIntegrationSupported` 就这么漏过一次）。
+   * 现算的守卫在 `test/config-roundtrip.test.ts` 的「整份快照回提交必须 200」那条——它直接
+   * 读本文件的这份清单，两边不可能各写一份。
    */
-  const NON_CONFIG_KEYS = new Set(['toolsRegistered', 'platform', 'allowProxyCommandGranted', 'allowProxyCommandGrantSource', 'allowProxyCommandGrantedAt'])
+  const NON_CONFIG_KEYS = new Set(['toolsRegistered', 'platform', 'shellIntegrationSupported', 'allowProxyCommandGranted', 'allowProxyCommandGrantSource', 'allowProxyCommandGrantedAt'])
   const toPayload = (source) => {
     const body = {}
     for (const [key, value] of Object.entries(source || {})) {
